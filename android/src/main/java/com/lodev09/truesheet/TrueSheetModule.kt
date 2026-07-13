@@ -126,6 +126,8 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
     Handler(Looper.getMainLooper()).post {
       try {
         fun dismissRegisteredSheets() {
+          // Snapshot: dismiss() unregisters the view, mutating viewRegistry mid-iteration.
+          // (viewRegistry is a ConcurrentHashMap, so this is a defensive copy, not a CME guard.)
           for (view in viewRegistry.values.toList()) {
             if (view.viewController.isPresented && !view.viewController.isBeingDismissed) {
               view.dismiss(animated = false) { }

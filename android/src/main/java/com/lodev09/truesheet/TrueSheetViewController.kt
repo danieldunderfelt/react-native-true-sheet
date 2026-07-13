@@ -152,7 +152,7 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   var isPresented = false
     private set
 
-  internal val hideReasons = mutableSetOf<HideReason>()
+  private val hideReasons = mutableSetOf<HideReason>()
 
   val isSheetVisible: Boolean
     get() = isPresented && hideReasons.isEmpty()
@@ -677,23 +677,27 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     val generation = visibilityGeneration
 
     if (wasVisible) {
-      delegate?.viewControllerDidChangeVisibility(false)
-      dimViews.forEach { it.animate().alpha(0f).setDuration(SCREEN_FADE_DURATION).start() }
-      sheet.animate()
-        .alpha(0f)
-        .setDuration(SCREEN_FADE_DURATION)
-        .withEndAction {
-          if (generation == visibilityGeneration) {
-            setSheetVisibility(false)
-          }
-        }
-        .start()
+      animateFadeOutForScreen(sheet, generation)
     } else {
       setSheetVisibility(false)
     }
 
     // This will hide parent sheets first
     parentSheetView?.viewController?.hideForScreen()
+  }
+
+  private fun animateFadeOutForScreen(sheet: TrueSheetBottomSheetView, generation: Int) {
+    delegate?.viewControllerDidChangeVisibility(false)
+    dimViews.forEach { it.animate().alpha(0f).setDuration(SCREEN_FADE_DURATION).start() }
+    sheet.animate()
+      .alpha(0f)
+      .setDuration(SCREEN_FADE_DURATION)
+      .withEndAction {
+        if (generation == visibilityGeneration) {
+          setSheetVisibility(false)
+        }
+      }
+      .start()
   }
 
   internal fun showAfterScreen() {
