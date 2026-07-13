@@ -144,13 +144,13 @@ using namespace facebook::react;
   [_screensEventObserver stopObserving];
   _screensEventObserver = nil;
 
-  if (_controller && _controller.presentingViewController) {
-    // Find the root presenting controller to dismiss the entire stack
-    UIViewController *root = _controller.presentingViewController;
-    while (root.presentingViewController != nil) {
-      root = root.presentingViewController;
-    }
-    [root dismissViewControllerAnimated:YES completion:nil];
+  [self cancelPendingPresentWithReason:@"deallocated"];
+
+  // Dismiss only this sheet's own presenter, non-animated — never the chain root (which
+  // would tear down unrelated modals and parent sheets), and without spawning a fresh
+  // animated transition that a subsequent present would then have to wait behind.
+  if (_controller && _controller.presentingViewController && !_controller.isBeingDismissed) {
+    [_controller.presentingViewController dismissViewControllerAnimated:NO completion:nil];
   }
 
   _didInitiallyPresent = NO;
@@ -353,6 +353,30 @@ using namespace facebook::react;
 
   [TrueSheetModule unregisterViewWithTag:@(self.tag)];
 
+  // Invalidate any deferred present from this incarnation and stop observing.
+  _generation++;
+  [self cancelPendingPresentWithReason:@"recycled"];
+  [_screensEventObserver stopObserving];
+
+  // A presented sheet whose owning view is being recycled must be dismissed here — dealloc
+  // is deferred indefinitely by the recycle pool, leaving a zombie controller behind. Scope
+  // the dismissal to this sheet's own presenter, and skip when the presenter is itself being
+  // torn down (navigation / RNS), which would double-dismiss.
+  if (_controller.isPresented && !_controller.isBeingDismissed && _controller.presentingViewController != nil &&
+      !_controller.presentingViewController.isBeingDismissed && _controller.viewIfLoaded.window != nil) {
+    UIViewController *presented = _controller.presentedViewController;
+    if (presented == nil || presented.isBeingDismissed) {
+      // The snapshot inserted by unmountChildComponentView animates out in our place.
+      [_controller.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+    } else {
+      // A live child is presented on top of us — dismissing would take it down too. Mark the
+      // controller so it self-heals once that child is gone.
+      _controller.orphanedAfterUnmount = YES;
+    }
+  }
+
+  _controller.activeDetentIndex = -1;
+
   _lastStateSize = CGSizeZero;
   _didInitiallyPresent = NO;
   _dismissedByNavigation = NO;
@@ -469,6 +493,15 @@ using namespace facebook::react;
   }
 
   if (_controller.isBeingPresented || _controller.isPresented) {
+    if (_controller.orphanedAfterUnmount) {
+      // This recycled view is being reused for a new sheet while its previous controller is
+      // still a presented zombie. Tear the zombie down and queue this present to replay clean.
+      _controller.orphanedAfterUnmount = NO;
+      [_controller.presentingViewController dismissViewControllerAnimated:NO completion:nil];
+      [self storePendingPresentAtIndex:index animated:animated completion:completion];
+      return;
+    }
+
     RCTLogWarn(@"TrueSheet: sheet is already presented. Use resize() to change detent.");
     if (completion) {
       completion(YES, nil);
