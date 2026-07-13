@@ -1,6 +1,8 @@
+import { createRef } from 'react';
 import { Text } from 'react-native';
 import { render, act } from '@testing-library/react-native';
 import { TrueSheet, TrueSheetPeek } from '../index';
+import NativeTrueSheetModule from '../specs/NativeTrueSheetModule';
 import type {
   DidDismissEvent,
   WillFocusEvent,
@@ -288,6 +290,159 @@ describe('TrueSheet', () => {
       });
 
       expect(onDidBlurMock).toHaveBeenCalled();
+    });
+  });
+
+  describe('Re-entrancy and promise safety', () => {
+    it('keeps the native view mounted when present() is called from onDidDismiss', async () => {
+      const { getByText, queryByText } = render(
+        <TrueSheet
+          name="reentrant-dismiss"
+          initialDetentIndex={0}
+          onDidDismiss={() => {
+            (TrueSheet as any).instances['reentrant-dismiss']?.present().catch(() => {});
+          }}
+        >
+          <Text>Reentrant Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByText('Reentrant Content')).toBeDefined();
+
+      const sheetRef = (TrueSheet as any).instances['reentrant-dismiss'];
+      await act(async () => {
+        sheetRef.onDidDismiss({} as DidDismissEvent);
+      });
+
+      // present() inside the callback sets isPresenting before the unmount decision,
+      // so the container must stay mounted.
+      expect(queryByText('Reentrant Content')).not.toBeNull();
+    });
+
+    it('rejects a pending present() when the sheet unmounts before it mounts', async () => {
+      const ref = createRef<any>();
+      const { unmount } = render(
+        <TrueSheet ref={ref} name="unmount-pending">
+          <Text>Pending Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      let capturedError: unknown = null;
+
+      // Lazy sheet: present() awaits the mount round-trip, which never completes in tests.
+      await act(async () => {
+        sheet.present().catch((error: unknown) => {
+          capturedError = error;
+        });
+      });
+
+      await act(async () => {
+        unmount();
+      });
+
+      expect(capturedError).toBeInstanceOf(Error);
+      expect(String(capturedError)).toMatch(/unmounted/);
+    });
+
+    it('resets isPresenting after a failed native present so a later dismiss can unmount', async () => {
+      (NativeTrueSheetModule as any).presentByRef.mockImplementationOnce(() =>
+        Promise.reject(new Error('native present failed'))
+      );
+
+      const ref = createRef<any>();
+      const { getByText, queryByText } = render(
+        <TrueSheet ref={ref} name="wedge-test" initialDetentIndex={0}>
+          <Text>Wedge Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      expect(getByText('Wedge Content')).toBeDefined();
+
+      await act(async () => {
+        await sheet.present().catch(() => {});
+      });
+
+      // The finally block resets the guard even though the native call rejected (#590).
+      expect(sheet.isPresenting).toBe(false);
+
+      await act(async () => {
+        sheet.onDidDismiss({} as DidDismissEvent);
+      });
+
+      expect(queryByText('Wedge Content')).toBeNull();
+    });
+
+    it('rejects present() outright once the sheet is unmounted', async () => {
+      const ref = createRef<any>();
+      const { unmount } = render(
+        <TrueSheet ref={ref} name="present-after-unmount" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      await act(async () => {
+        unmount();
+      });
+
+      await expect(sheet.present()).rejects.toThrow(/unmounted/);
+    });
+
+    it('handleBackPress falls through (returns false) when the native tag is gone', () => {
+      const ref = createRef<any>();
+      render(
+        <TrueSheet ref={ref} name="backpress-teardown" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      sheet.isPresented = true;
+      sheet.isSheetVisible = true;
+      // Simulate teardown: the native handle is no longer resolvable (#718).
+      sheet.nativeRef.current = null;
+
+      expect(() => sheet.handleBackPress()).not.toThrow();
+      expect(sheet.handleBackPress()).toBe(false);
+    });
+  });
+
+  describe('suspended prop', () => {
+    it('keeps the native view mounted when suspended is toggled on', () => {
+      const { getByText, rerender } = render(
+        <TrueSheet name="suspend-mount" initialDetentIndex={0}>
+          <Text>Suspend Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByText('Suspend Content')).toBeDefined();
+
+      rerender(
+        <TrueSheet name="suspend-mount" initialDetentIndex={0} suspended>
+          <Text>Suspend Content</Text>
+        </TrueSheet>
+      );
+
+      // suspension is a native-only concern; the sheet stays logically presented in JS.
+      expect(getByText('Suspend Content')).toBeDefined();
+    });
+
+    it('handleBackPress returns false while suspended', () => {
+      const ref = createRef<any>();
+      render(
+        <TrueSheet ref={ref} name="backpress-suspended" initialDetentIndex={0} suspended>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      sheet.isPresented = true;
+      sheet.isSheetVisible = true;
+
+      // The synchronous prop guard wins even before the native visibility event lands.
+      expect(sheet.handleBackPress()).toBe(false);
     });
   });
 });
