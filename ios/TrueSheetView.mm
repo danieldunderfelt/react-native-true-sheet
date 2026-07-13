@@ -65,6 +65,21 @@ using namespace facebook::react;
   BOOL _pendingPropsUpdate;
   NSArray *_pendingDetents;
   RNScreensEventObserver *_screensEventObserver;
+
+  // Single-slot pending present. A present issued while a dismissal transition is in
+  // flight (our own, or one owned by the presenter chain) is parked here and replayed
+  // from that transition's completion — never a timer.
+  BOOL _hasPendingPresent;
+  NSInteger _pendingPresentIndex;
+  BOOL _pendingPresentAnimated;
+  TrueSheetCompletionBlock _pendingPresentCompletion;
+  NSUInteger _pendingPresentAttempts;
+  CFTimeInterval _pendingPresentDeferredAt;
+  NSUInteger _pendingPresentGeneration;
+  NSUInteger _generation;
+  BOOL _isReplayingPendingPresent;
+  NSUInteger _currentReplayAttempts;
+  CFTimeInterval _currentReplayDeferredAt;
 }
 
 #pragma mark - Initialization
@@ -435,6 +450,24 @@ using namespace facebook::react;
 - (void)presentAtIndex:(NSInteger)index
               animated:(BOOL)animated
             completion:(nullable TrueSheetCompletionBlock)completion {
+  // Gate 1: our own controller is mid-dismissal. Defer rather than false-resolving through
+  // the already-presented guard below, since isPresented stays YES throughout an animated
+  // dismissal. The transition coordinator also covers a cancelled interactive dismissal,
+  // where viewControllerDidDismiss never fires.
+  if (_controller.isBeingDismissed) {
+    [self storePendingPresentAtIndex:index animated:animated completion:completion];
+
+    id<UIViewControllerTransitionCoordinator> coordinator = _controller.transitionCoordinator;
+    if (coordinator) {
+      __weak __typeof(self) weakSelf = self;
+      [coordinator animateAlongsideTransition:nil
+                                   completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
+                                     [weakSelf flushPendingPresent];
+                                   }];
+    }
+    return;
+  }
+
   if (_controller.isBeingPresented || _controller.isPresented) {
     RCTLogWarn(@"TrueSheet: sheet is already presented. Use resize() to change detent.");
     if (completion) {
@@ -453,6 +486,29 @@ using namespace facebook::react;
                                      userInfo:@{NSLocalizedDescriptionKey : @"No presenting view controller found"}];
     if (completion) {
       completion(NO, error);
+    }
+    return;
+  }
+
+  // Gate 2: the presenter still owns a view controller that is being dismissed — a sheet,
+  // an RN Modal, or an RNS modal (class-agnostic). UIKit would refuse this present and
+  // never call our completion, so defer and replay from the in-flight transition.
+  UIViewController *occupyingController = presentingViewController.presentedViewController;
+  if (occupyingController != nil) {
+    [self storePendingPresentAtIndex:index animated:animated completion:completion];
+
+    __weak __typeof(self) weakSelf = self;
+    id<UIViewControllerTransitionCoordinator> coordinator = occupyingController.transitionCoordinator;
+    if (coordinator) {
+      [coordinator animateAlongsideTransition:nil
+                                   completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
+                                     [weakSelf flushPendingPresent];
+                                   }];
+    } else {
+      // Dismissal enqueued but its transition has not started yet — bounded retry.
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf flushPendingPresent];
+      });
     }
     return;
   }
@@ -508,6 +564,10 @@ using namespace facebook::react;
 }
 
 - (void)dismissAnimated:(BOOL)animated completion:(nullable TrueSheetCompletionBlock)completion {
+  // A dismiss supersedes any parked present (e.g. present(); dismiss(); in one tick) so the
+  // present settles deterministically instead of resurrecting the sheet on a later replay.
+  [self cancelPendingPresentWithReason:@"dismissed"];
+
   if (_controller.isBeingDismissed || !_controller.isPresented) {
     RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
 
@@ -664,6 +724,10 @@ using namespace facebook::react;
     _controller.activeDetentIndex = -1;
     [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
   }
+
+  // Our own dismissal finished — drain any present that was parked behind it. Runs after
+  // the navigation gate so a swap-and-reopen replays regardless of dismissal cause.
+  [self flushPendingPresent];
 }
 
 - (void)viewControllerDidChangeDetent:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
@@ -744,6 +808,108 @@ using namespace facebook::react;
                                          completion:^{
                                            [weakSelf dismissAnimated:NO completion:nil];
                                          }];
+}
+
+#pragma mark - Pending Present Queue
+
+- (void)storePendingPresentAtIndex:(NSInteger)index
+                          animated:(BOOL)animated
+                        completion:(nullable TrueSheetCompletionBlock)completion {
+  if (_hasPendingPresent && _pendingPresentCompletion) {
+    _pendingPresentCompletion(NO, [self pendingPresentCancelledError:@"superseded"]);
+  }
+
+  _hasPendingPresent = YES;
+  _pendingPresentIndex = index;
+  _pendingPresentAnimated = animated;
+  _pendingPresentCompletion = completion;
+  _pendingPresentGeneration = _generation;
+
+  if (_isReplayingPendingPresent) {
+    _pendingPresentAttempts = _currentReplayAttempts + 1;
+    _pendingPresentDeferredAt = _currentReplayDeferredAt;
+  } else {
+    _pendingPresentAttempts = 0;
+    _pendingPresentDeferredAt = CACurrentMediaTime();
+  }
+}
+
+- (void)flushPendingPresent {
+  if (!_hasPendingPresent) {
+    return;
+  }
+
+  NSInteger index = _pendingPresentIndex;
+  BOOL animated = _pendingPresentAnimated;
+  TrueSheetCompletionBlock completion = _pendingPresentCompletion;
+  NSUInteger generation = _pendingPresentGeneration;
+  NSUInteger attempts = _pendingPresentAttempts;
+  CFTimeInterval deferredAt = _pendingPresentDeferredAt;
+
+  _hasPendingPresent = NO;
+  _pendingPresentCompletion = nil;
+
+  if (generation != _generation) {
+    if (completion) {
+      completion(NO, [self pendingPresentCancelledError:@"recycled"]);
+    }
+    return;
+  }
+
+  if (attempts >= 10 || (CACurrentMediaTime() - deferredAt) > 2.0) {
+    if (completion) {
+      completion(NO, [self pendingPresentTimeoutError]);
+    }
+    return;
+  }
+
+  __weak __typeof(self) weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    __strong __typeof(weakSelf) strongSelf = weakSelf;
+    if (!strongSelf) {
+      if (completion) {
+        completion(NO, [NSError errorWithDomain:@"com.lodev09.TrueSheet"
+                                           code:1003
+                                       userInfo:@{NSLocalizedDescriptionKey : @"Presentation cancelled"}]);
+      }
+      return;
+    }
+
+    strongSelf->_isReplayingPendingPresent = YES;
+    strongSelf->_currentReplayAttempts = attempts;
+    strongSelf->_currentReplayDeferredAt = deferredAt;
+    [strongSelf presentAtIndex:index animated:animated completion:completion];
+    strongSelf->_isReplayingPendingPresent = NO;
+  });
+}
+
+- (void)cancelPendingPresentWithReason:(NSString *)reason {
+  if (!_hasPendingPresent) {
+    return;
+  }
+
+  TrueSheetCompletionBlock completion = _pendingPresentCompletion;
+  _hasPendingPresent = NO;
+  _pendingPresentCompletion = nil;
+
+  if (completion) {
+    completion(NO, [self pendingPresentCancelledError:reason]);
+  }
+}
+
+- (NSError *)pendingPresentCancelledError:(NSString *)reason {
+  NSString *message =
+    reason.length > 0 ? [NSString stringWithFormat:@"Presentation cancelled: %@", reason] : @"Presentation cancelled";
+  return [NSError errorWithDomain:@"com.lodev09.TrueSheet"
+                             code:1003
+                         userInfo:@{NSLocalizedDescriptionKey : message}];
+}
+
+- (NSError *)pendingPresentTimeoutError {
+  return [NSError
+    errorWithDomain:@"com.lodev09.TrueSheet"
+               code:1002
+           userInfo:@{NSLocalizedDescriptionKey : @"Presentation timed out waiting for an in-flight transition"}];
 }
 
 #pragma mark - Private Helpers

@@ -64,7 +64,13 @@ RCT_EXPORT_MODULE(TrueSheetModule)
                          if (success) {
                            resolve(nil);
                          } else {
-                           reject(@"PRESENT_FAILED", error.localizedDescription ?: @"Failed to present sheet", error);
+                           NSString *code = @"PRESENT_FAILED";
+                           if (error.code == 1002) {
+                             code = @"PRESENT_TIMEOUT";
+                           } else if (error.code == 1003) {
+                             code = @"PRESENT_CANCELLED";
+                           }
+                           reject(code, error.localizedDescription ?: @"Failed to present sheet", error);
                          }
                        }];
   });
@@ -148,6 +154,11 @@ RCT_EXPORT_MODULE(TrueSheetModule)
 - (void)dismissAll:(BOOL)animated resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   RCTExecuteOnMainQueue(^{
     @synchronized(viewRegistry) {
+      // No parked present may resurrect a sheet mid-dismissAll.
+      for (TrueSheetView *view in viewRegistry.allValues) {
+        [view cancelPendingPresentWithReason:@"dismissAll"];
+      }
+
       // Find the root presented sheet (one without a parent TrueSheet)
       TrueSheetView *rootSheet = nil;
 
