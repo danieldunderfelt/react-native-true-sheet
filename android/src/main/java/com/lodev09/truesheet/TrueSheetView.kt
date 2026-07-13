@@ -61,6 +61,8 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   // Debounce flag to coalesce rapid layout changes into a single sheet update
   private var isSheetUpdatePending: Boolean = false
+  private var pendingPresent: (() -> Unit)? = null
+  private var pendingPresentPromise: (() -> Unit)? = null
 
   // Root container for the coordinator layout (activity or Modal dialog content view)
   internal var rootContainerView: ViewGroup? = null
@@ -163,6 +165,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   }
 
   fun onDropInstance() {
+    cancelPendingOps()
     reactContext.removeLifecycleEventListener(this)
 
     TrueSheetModule.unregisterView(id)
@@ -344,8 +347,23 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   // ==================== Sheet Actions ====================
 
+  private fun cancelPendingOps() {
+    if (pendingPresent != null) {
+      pendingPresentPromise?.invoke()
+      pendingPresent = null
+      pendingPresentPromise = null
+    }
+  }
+
   @UiThread
   fun present(detentIndex: Int, animated: Boolean = true, promiseCallback: () -> Unit) {
+    if (viewController.isBeingDismissed) {
+      cancelPendingOps()
+      pendingPresent = { present(detentIndex, animated, promiseCallback) }
+      pendingPresentPromise = promiseCallback
+      return
+    }
+
     if (viewController.isPresented) {
       RNLog.w(reactContext, "TrueSheet: sheet is already presented. Use resize() to change detent.")
       promiseCallback()
@@ -385,6 +403,8 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   @UiThread
   fun dismiss(animated: Boolean = true, promiseCallback: () -> Unit) {
+    cancelPendingOps()
+
     if (viewController.isBeingDismissed || !viewController.isPresented) {
       RNLog.w(reactContext, "TrueSheet: sheet is already dismissed. No need to dismiss it again.")
       promiseCallback()
@@ -455,7 +475,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
    * Propagates additional translation to parent so the entire stack stays visually consistent.
    */
   fun updateTranslationForChild(childSheetTop: Int) {
-    if (!viewController.isSheetVisible || viewController.isExpanded) return
+    if (!viewController.isSheetVisible || viewController.isExpanded || viewController.isBeingDismissed) return
 
     viewController.sheetView?.behavior?.isDraggable = false
 
@@ -527,6 +547,12 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
     eventDispatcher?.dispatchEvent(DidDismissEvent(surfaceId, id))
 
     TrueSheetStackManager.unregisterSheet(this)
+
+    pendingPresent?.let { p ->
+      pendingPresent = null
+      pendingPresentPromise = null
+      post { p() }
+    }
 
     parent?.resetTranslation {
       val parentController = parent.viewController

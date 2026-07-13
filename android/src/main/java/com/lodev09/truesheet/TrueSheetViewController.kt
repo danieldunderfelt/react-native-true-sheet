@@ -1197,10 +1197,10 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
 
   private fun emitDidDismissEvents() {
     val parent = parentSheetView
-    parentSheetView = null
 
     delegate?.viewControllerDidBlur()
     delegate?.viewControllerDidDismiss(parent)
+    parentSheetView = null
 
     dismissPromise?.invoke()
     dismissPromise = null
