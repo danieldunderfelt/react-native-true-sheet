@@ -100,6 +100,19 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   BOOL _isReplayingPendingPresent;
   NSUInteger _currentReplayAttempts;
   CFTimeInterval _currentReplayDeferredAt;
+
+  // Content-not-ready gate. A present that lands before the container child has mounted — or
+  // after it was torn down for an unmount/recycle — is parked here and replayed from
+  // mountChildComponentView. A sheet must never appear without its content (an empty bar that
+  // then vanishes when the teardown completes). Unlike the pending-present slot this has no
+  // timeout: the mount is a deterministic signal, and a present that never gets content is
+  // cleared by recycle/dealloc/dismiss instead.
+  BOOL _hasPendingContentPresent;
+  NSInteger _pendingContentPresentIndex;
+  BOOL _pendingContentPresentAnimated;
+  TrueSheetCompletionBlock _pendingContentPresentCompletion;
+  BOOL _pendingContentPresentSuppressesEvents;
+  NSUInteger _pendingContentPresentGeneration;
 }
 
 #pragma mark - Initialization
@@ -170,6 +183,7 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   _screensEventObserver = nil;
 
   [self cancelPendingPresentWithReason:@"deallocated"];
+  [self cancelPendingContentPresentWithReason:@"deallocated"];
 
   // Dismiss only this sheet's own presenter, non-animated — never the chain root (which
   // would tear down unrelated modals and parent sheets), and without spawning a fresh
@@ -404,6 +418,7 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   // Invalidate any deferred present from this incarnation and stop observing.
   _generation++;
   [self cancelPendingPresentWithReason:@"recycled"];
+  [self cancelPendingContentPresentWithReason:@"recycled"];
   [_screensEventObserver stopObserving];
 
   // A presented sheet whose owning view is being recycled must be dismissed here — dealloc
@@ -508,6 +523,9 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   } else {
     _pendingMountEvent = YES;
   }
+
+  // Content is now attached — replay any present that was parked waiting for it.
+  [self flushPendingContentPresent];
 }
 
 - (void)unmountChildComponentView:(UIView<RCTComponentViewProtocol> *)childComponentView index:(NSInteger)index {
@@ -632,6 +650,15 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
     return;
   }
 
+  // Gate 3: the container child has not mounted (or was torn down for an unmount/recycle).
+  // Presenting now would show an empty sheet that vanishes once the teardown settles — the
+  // classic symptom when a navigation represent or an initial present races content mounting.
+  // Park it and replay from mountChildComponentView so the sheet only ever appears with content.
+  if (_containerView == nil) {
+    [self storePendingContentPresentAtIndex:index animated:animated completion:completion];
+    return;
+  }
+
   [_controller setupAnchorViewInView:presentingViewController.view];
   [_controller setupSheetSizing];
   [_controller setupSheetProps];
@@ -709,6 +736,7 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   // A dismiss supersedes any parked present (e.g. present(); dismiss(); in one tick) so the
   // present settles deterministically instead of resurrecting the sheet on a later replay.
   [self cancelPendingPresentWithReason:@"dismissed"];
+  [self cancelPendingContentPresentWithReason:@"dismissed"];
 
   if (_controller.isBeingPresented) {
     // Keep a non-nil block so viewControllerDidPresentAtIndex knows a dismiss is pending even
@@ -1094,6 +1122,61 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   _pendingPresentCompletion = nil;
   _suppressPresentEvents = NO;
   _presentEventGeneration = 0;
+
+  if (completion) {
+    completion(NO, [self pendingPresentCancelledError:reason]);
+  }
+}
+
+- (void)storePendingContentPresentAtIndex:(NSInteger)index
+                                 animated:(BOOL)animated
+                               completion:(nullable TrueSheetCompletionBlock)completion {
+  if (_hasPendingContentPresent && _pendingContentPresentCompletion) {
+    _pendingContentPresentCompletion(NO, [self pendingPresentCancelledError:@"superseded"]);
+  }
+
+  _hasPendingContentPresent = YES;
+  _pendingContentPresentIndex = index;
+  _pendingContentPresentAnimated = animated;
+  _pendingContentPresentCompletion = completion;
+  _pendingContentPresentGeneration = _generation;
+  _pendingContentPresentSuppressesEvents = _nextPresentSuppressesEvents;
+  _nextPresentSuppressesEvents = NO;
+}
+
+- (void)flushPendingContentPresent {
+  if (!_hasPendingContentPresent) {
+    return;
+  }
+
+  NSInteger index = _pendingContentPresentIndex;
+  BOOL animated = _pendingContentPresentAnimated;
+  TrueSheetCompletionBlock completion = _pendingContentPresentCompletion;
+  NSUInteger generation = _pendingContentPresentGeneration;
+  BOOL suppresses = _pendingContentPresentSuppressesEvents;
+
+  _hasPendingContentPresent = NO;
+  _pendingContentPresentCompletion = nil;
+
+  if (generation != _generation) {
+    if (completion) {
+      completion(NO, [self pendingPresentCancelledError:@"recycled"]);
+    }
+    return;
+  }
+
+  _nextPresentSuppressesEvents = suppresses;
+  [self presentAtIndex:index animated:animated completion:completion];
+}
+
+- (void)cancelPendingContentPresentWithReason:(NSString *)reason {
+  if (!_hasPendingContentPresent) {
+    return;
+  }
+
+  TrueSheetCompletionBlock completion = _pendingContentPresentCompletion;
+  _hasPendingContentPresent = NO;
+  _pendingContentPresentCompletion = nil;
 
   if (completion) {
     completion(NO, [self pendingPresentCancelledError:reason]);
