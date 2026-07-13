@@ -27,8 +27,17 @@ object TrueSheetStackManager {
    */
   private fun findTopmostSheet(): TrueSheetView? =
     presentedSheetStack.lastOrNull {
-      it.viewController.isPresented && it.viewController.isSheetVisible
+      it.viewController.isPresented && it.viewController.isSheetVisible && !it.viewController.isBeingDismissed
     }
+
+  private fun reparentChildren(sheetView: TrueSheetView) {
+    val parentSheetView = sheetView.viewController.parentSheetView
+    presentedSheetStack.forEach {
+      if (it != sheetView && it.viewController.parentSheetView == sheetView) {
+        it.viewController.parentSheetView = parentSheetView
+      }
+    }
+  }
 
   /**
    * Registers a sheet in the stack and returns its parent sheet if any.
@@ -53,6 +62,7 @@ object TrueSheetStackManager {
   @JvmStatic
   fun unregisterSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -99,6 +109,7 @@ object TrueSheetStackManager {
   @JvmStatic
   fun removeSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
