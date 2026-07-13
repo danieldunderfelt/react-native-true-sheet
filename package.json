@@ -149,12 +149,6 @@
       "optional": true
     }
   },
-  "workspaces": [
-    "example/bare",
-    "example/expo",
-    "example/shared",
-    "docs"
-  ],
   "packageManager": "yarn@4.11.0",
   "jest": {
     "preset": "@react-native/jest-preset",
