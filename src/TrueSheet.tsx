@@ -61,6 +61,25 @@ interface TrueSheetState {
   shouldRenderNativeView: boolean;
 }
 
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`TrueSheet: ${label} timed out`));
+    }, ms);
+
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export class TrueSheet
   extends PureComponent<TrueSheetProps, TrueSheetState>
   implements TrueSheetMethods
@@ -84,11 +103,14 @@ export class TrueSheet
    * Resolver to be called when mount event is received
    */
   private presentationResolver: (() => void) | null = null;
+  private presentationRejecter: ((e: Error) => void) | null = null;
 
   /**
    * Tracks if a present operation is in progress
    */
   private isPresenting: boolean = false;
+  private presentToken = 0;
+  private unmounted = false;
 
   constructor(props: TrueSheetProps) {
     super(props);
@@ -299,13 +321,13 @@ export class TrueSheet
     this.backHandlerSubscription?.remove();
     this.backHandlerSubscription = null;
 
-    // Clean up native view after dismiss for lazy loading.
-    // Skip unmount if a present is in progress to avoid race condition.
-    if (!this.isPresenting) {
-      this.setState({ shouldRenderNativeView: false });
+    try {
+      this.props.onDidDismiss?.(event);
+    } finally {
+      if (!this.isPresenting) {
+        this.setState({ shouldRenderNativeView: false });
+      }
     }
-
-    this.props.onDidDismiss?.(event);
   }
 
   private onMount(event: MountEvent): void {
@@ -313,6 +335,7 @@ export class TrueSheet
     if (this.presentationResolver) {
       this.presentationResolver();
       this.presentationResolver = null;
+      this.presentationRejecter = null;
     }
 
     this.props.onMount?.(event);
@@ -362,7 +385,10 @@ export class TrueSheet
       return this.props.onBackPress?.() ?? false;
     }
 
-    TrueSheetModule?.handleBackPress(this.handle);
+    const handle = findNodeHandle(this.nativeRef.current);
+    if (handle == null || handle === -1) return false;
+
+    TrueSheetModule?.handleBackPress(handle);
     return this.props.onBackPress?.() ?? true;
   }
 
@@ -372,6 +398,10 @@ export class TrueSheet
    * @param animated - Whether to animate the presentation (default: true)
    */
   public async present(index: number = 0, animated: boolean = true): Promise<void> {
+    if (this.unmounted) {
+      throw new Error('TrueSheet: sheet is unmounted');
+    }
+
     const detentsLength = Math.min(this.props.detents?.length ?? 2, 3); // Max 3 detents
     if (index < 0 || index >= detentsLength) {
       throw new Error(
@@ -379,18 +409,29 @@ export class TrueSheet
       );
     }
 
+    const token = ++this.presentToken;
     this.isPresenting = true;
 
-    // Lazy load: render native view if not already rendered
-    if (!this.state.shouldRenderNativeView) {
-      await new Promise<void>((resolve) => {
-        this.presentationResolver = resolve;
-        this.setState({ shouldRenderNativeView: true });
-      });
-    }
+    try {
+      // Lazy load: render native view if not already rendered
+      if (!this.state.shouldRenderNativeView) {
+        await new Promise<void>((resolve, reject) => {
+          this.presentationResolver = resolve;
+          this.presentationRejecter = reject;
+          this.setState({ shouldRenderNativeView: true });
+        });
+      }
 
-    await TrueSheetModule?.presentByRef(this.handle, index, animated);
-    this.isPresenting = false;
+      await withTimeout(
+        TrueSheetModule?.presentByRef(this.handle, index, animated) ?? Promise.resolve(),
+        6000,
+        'present'
+      );
+    } finally {
+      if (token === this.presentToken) {
+        this.isPresenting = false;
+      }
+    }
   }
 
   /**
@@ -398,6 +439,10 @@ export class TrueSheet
    * @param index - The detent index to resize to
    */
   public async resize(index: number): Promise<void> {
+    if (this.unmounted) {
+      throw new Error('TrueSheet: sheet is unmounted');
+    }
+
     await TrueSheetModule?.resizeByRef(this.handle, index);
   }
 
@@ -406,7 +451,15 @@ export class TrueSheet
    * @param animated - Whether to animate the dismissal (default: true)
    */
   public async dismiss(animated: boolean = true): Promise<void> {
-    return TrueSheetModule?.dismissByRef(this.handle, animated);
+    if (this.unmounted) {
+      throw new Error('TrueSheet: sheet is unmounted');
+    }
+
+    return withTimeout(
+      TrueSheetModule?.dismissByRef(this.handle, animated) ?? Promise.resolve(),
+      6000,
+      'dismiss'
+    );
   }
 
   /**
@@ -435,7 +488,13 @@ export class TrueSheet
     this.unregisterInstance();
     this.backHandlerSubscription?.remove();
     this.backHandlerSubscription = null;
+    this.unmounted = true;
+    this.presentationRejecter?.(
+      new Error('TrueSheet: sheet was unmounted before it could be presented')
+    );
     this.presentationResolver = null;
+    this.presentationRejecter = null;
+    this.isPresenting = false;
   }
 
   render(): ReactNode {
