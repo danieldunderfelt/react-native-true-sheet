@@ -711,7 +711,9 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   [self cancelPendingPresentWithReason:@"dismissed"];
 
   if (_controller.isBeingPresented) {
-    _applyDismissAfterPresent = [completion copy] ?: ^(__unused BOOL success, __unused NSError *error) {
+    // Keep a non-nil block so viewControllerDidPresentAtIndex knows a dismiss is pending even
+    // when the caller passed no completion. ARC copies the block on assignment to the ivar.
+    _applyDismissAfterPresent = completion ?: ^(__unused BOOL success, __unused NSError *error) {
     };
     return;
   }
