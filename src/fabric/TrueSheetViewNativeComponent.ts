@@ -103,6 +103,7 @@ export interface NativeProps extends ViewProps {
   draggable?: WithDefault<boolean, true>;
   dimmed?: WithDefault<boolean, true>;
   initialDetentAnimated?: WithDefault<boolean, true>;
+  suspended?: WithDefault<boolean, false>;
   scrollable?: WithDefault<boolean, false>;
   scrollableOptions?: ScrollableOptionsType;
   footerOptions?: FooterOptionsType;

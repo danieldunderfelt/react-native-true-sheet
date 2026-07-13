@@ -38,6 +38,11 @@
 
 using namespace facebook::react;
 
+typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
+  TrueSheetHideReasonNavigation = 1 << 0,
+  TrueSheetHideReasonSuspension = 1 << 1,
+};
+
 @interface TrueSheetView () <TrueSheetViewControllerDelegate,
   TrueSheetContainerViewDelegate,
   RNScreensEventObserverDelegate>
@@ -65,6 +70,21 @@ using namespace facebook::react;
   BOOL _pendingPropsUpdate;
   NSArray *_pendingDetents;
   RNScreensEventObserver *_screensEventObserver;
+  BOOL _suspendedProp;
+  BOOL _logicallyOpen;
+  BOOL _resumeEmitsPresentEvents;
+  NSUInteger _hideReasons;
+  BOOL _dismissingForSuspension;
+  BOOL _suppressPresentEvents;
+  NSUInteger _presentEventGeneration;
+  BOOL _applySuspendAfterPresent;
+  TrueSheetCompletionBlock _applyDismissAfterPresent;
+  BOOL _pendingSuspendedValue;
+  BOOL _hasPendingSuspendedChange;
+  // Whether the next actual presentViewController: should suppress present events (a silent
+  // resume). Threaded through the pending-present slot so a defer/supersede can't leak it.
+  BOOL _nextPresentSuppressesEvents;
+  BOOL _pendingPresentSuppressesEvents;
 
   // Single-slot pending present. A present issued while a dismissal transition is in
   // flight (our own, or one owned by the presenter chain) is parked here and replayed
@@ -122,11 +142,16 @@ using namespace facebook::react;
 
   if (_pendingNavigationRepresent && !_controller.isPresented) {
     _pendingNavigationRepresent = NO;
-    [self presentAtIndex:_controller.activeDetentIndex animated:YES completion:nil];
+    [self flushRepresentIfNeeded];
     return;
   }
 
-  if (_initialDetentIndex >= 0 && !_didInitiallyPresent) {
+  if (_initialDetentIndex >= 0 && !_didInitiallyPresent && _suspendedProp) {
+    _logicallyOpen = YES;
+    _resumeEmitsPresentEvents = YES;
+  }
+
+  if (_initialDetentIndex >= 0 && !_didInitiallyPresent && !_suspendedProp) {
     UIViewController *vc = [self findPresentingViewController];
 
     // Only present if the view controller is in the same window and not being dismissed
@@ -156,6 +181,19 @@ using namespace facebook::react;
   _didInitiallyPresent = NO;
   _dismissedByNavigation = NO;
   _pendingNavigationRepresent = NO;
+  _suspendedProp = NO;
+  _logicallyOpen = NO;
+  _resumeEmitsPresentEvents = NO;
+  _hideReasons = 0;
+  _dismissingForSuspension = NO;
+  _suppressPresentEvents = NO;
+  _presentEventGeneration = 0;
+  _nextPresentSuppressesEvents = NO;
+  _pendingPresentSuppressesEvents = NO;
+  _applySuspendAfterPresent = NO;
+  _applyDismissAfterPresent = nil;
+  _pendingSuspendedValue = NO;
+  _hasPendingSuspendedChange = NO;
 
   _controller.delegate = nil;
   _controller = nil;
@@ -187,6 +225,10 @@ using namespace facebook::react;
     const auto &prevProps = *std::static_pointer_cast<TrueSheetViewProps const>(oldProps);
     if (newProps.detents != prevProps.detents || newProps.insetAdjustment != prevProps.insetAdjustment) {
       _pendingLayoutUpdate = YES;
+    }
+    if (newProps.suspended != prevProps.suspended) {
+      _pendingSuspendedValue = newProps.suspended;
+      _hasPendingSuspendedChange = YES;
     }
   }
 
@@ -346,6 +388,12 @@ using namespace facebook::react;
   } else if (_initialDetentIndex >= 0) {
     _pendingLayoutUpdate = NO;
   }
+
+  if (_hasPendingSuspendedChange) {
+    BOOL suspended = _pendingSuspendedValue;
+    _hasPendingSuspendedChange = NO;
+    [self applySuspended:suspended];
+  }
 }
 
 - (void)prepareForRecycle {
@@ -381,6 +429,19 @@ using namespace facebook::react;
   _didInitiallyPresent = NO;
   _dismissedByNavigation = NO;
   _pendingNavigationRepresent = NO;
+  _suspendedProp = NO;
+  _logicallyOpen = NO;
+  _resumeEmitsPresentEvents = NO;
+  _hideReasons = 0;
+  _dismissingForSuspension = NO;
+  _suppressPresentEvents = NO;
+  _presentEventGeneration = 0;
+  _nextPresentSuppressesEvents = NO;
+  _pendingPresentSuppressesEvents = NO;
+  _applySuspendAfterPresent = NO;
+  _applyDismissAfterPresent = nil;
+  _pendingSuspendedValue = NO;
+  _hasPendingSuspendedChange = NO;
 }
 
 #pragma mark - Child Component Mounting
@@ -474,6 +535,19 @@ using namespace facebook::react;
 - (void)presentAtIndex:(NSInteger)index
               animated:(BOOL)animated
             completion:(nullable TrueSheetCompletionBlock)completion {
+  if (_suspendedProp) {
+    if (!_controller.isPresented && !_logicallyOpen) {
+      _resumeEmitsPresentEvents = YES;
+    }
+    _logicallyOpen = YES;
+    _controller.activeDetentIndex = index;
+    RCTLogWarn(@"TrueSheet: sheet is suspended; it will present at index %ld on resume.", (long)index);
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
   // Gate 1: our own controller is mid-dismissal. Defer rather than false-resolving through
   // the already-presented guard below, since isPresented stays YES throughout an animated
   // dismissal. The transition coordinator also covers a cancelled interactive dismissal,
@@ -481,13 +555,22 @@ using namespace facebook::react;
   if (_controller.isBeingDismissed) {
     [self storePendingPresentAtIndex:index animated:animated completion:completion];
 
+    __weak __typeof(self) weakSelf = self;
     id<UIViewControllerTransitionCoordinator> coordinator = _controller.transitionCoordinator;
+    BOOL scheduled = NO;
     if (coordinator) {
-      __weak __typeof(self) weakSelf = self;
-      [coordinator animateAlongsideTransition:nil
-                                   completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
-                                     [weakSelf flushPendingPresent];
-                                   }];
+      scheduled =
+        [coordinator animateAlongsideTransition:nil
+                                     completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
+                                       [weakSelf flushPendingPresent];
+                                     }];
+    }
+    // viewControllerDidDismiss also flushes; the fallback covers a coordinator that reports
+    // no active transition (so its completion would never fire).
+    if (!scheduled) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf flushPendingPresent];
+      });
     }
     return;
   }
@@ -532,13 +615,16 @@ using namespace facebook::react;
 
     __weak __typeof(self) weakSelf = self;
     id<UIViewControllerTransitionCoordinator> coordinator = occupyingController.transitionCoordinator;
+    BOOL scheduled = NO;
     if (coordinator) {
-      [coordinator animateAlongsideTransition:nil
-                                   completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
-                                     [weakSelf flushPendingPresent];
-                                   }];
-    } else {
-      // Dismissal enqueued but its transition has not started yet — bounded retry.
+      scheduled =
+        [coordinator animateAlongsideTransition:nil
+                                     completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
+                                       [weakSelf flushPendingPresent];
+                                     }];
+    }
+    // Dismissal not yet started (or coordinator reports no active transition) — bounded retry.
+    if (!scheduled) {
       dispatch_async(dispatch_get_main_queue(), ^{
         [weakSelf flushPendingPresent];
       });
@@ -557,6 +643,13 @@ using namespace facebook::react;
   [_screensEventObserver capturePresenterScreenFromView:self];
   [_screensEventObserver startObservingWithState:_state.get()->getData()];
 
+  // Latch present-event suppression for exactly this presentation (a silent resume). Setting
+  // it here — not at defer time — means every real present resets the latch, so a superseded
+  // or consumer-cancelled resume can never silence a later present.
+  _suppressPresentEvents = _nextPresentSuppressesEvents;
+  _presentEventGeneration = _nextPresentSuppressesEvents ? _generation : 0;
+  _nextPresentSuppressesEvents = NO;
+
   [presentingViewController presentViewController:_controller
                                          animated:animated
                                        completion:^{
@@ -567,6 +660,14 @@ using namespace facebook::react;
 }
 
 - (void)resizeToIndex:(NSInteger)index completion:(nullable TrueSheetCompletionBlock)completion {
+  if (_logicallyOpen && !_controller.isPresented) {
+    _controller.activeDetentIndex = index;
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
   if (!_controller.isPresented) {
     RCTLogWarn(@"TrueSheet: Cannot resize. Sheet is not presented.");
     if (completion) {
@@ -596,10 +697,38 @@ using namespace facebook::react;
                                   realtime:NO];
 }
 
+- (void)emitVisibilityChange:(BOOL)visible {
+  [TrueSheetStateEvents emitVisibilityChange:_eventEmitter visible:visible];
+}
+
+- (BOOL)isLogicallyOpenWhileSuspended {
+  return _logicallyOpen && !_controller.isPresented;
+}
+
 - (void)dismissAnimated:(BOOL)animated completion:(nullable TrueSheetCompletionBlock)completion {
   // A dismiss supersedes any parked present (e.g. present(); dismiss(); in one tick) so the
   // present settles deterministically instead of resurrecting the sheet on a later replay.
   [self cancelPendingPresentWithReason:@"dismissed"];
+
+  if (_controller.isBeingPresented) {
+    _applyDismissAfterPresent = [completion copy] ?: ^(__unused BOOL success, __unused NSError *error) {
+    };
+    return;
+  }
+
+  if (_logicallyOpen && !_controller.isPresented) {
+    [self cancelPendingPresentWithReason:@"dismissed"];
+    _logicallyOpen = NO;
+    _resumeEmitsPresentEvents = NO;
+    _hideReasons &= ~TrueSheetHideReasonSuspension;
+    _controller.activeDetentIndex = -1;
+    [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
+    [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
 
   if (_controller.isBeingDismissed || !_controller.isPresented) {
     RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
@@ -704,12 +833,17 @@ using namespace facebook::react;
 
 - (void)viewControllerWillPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
   _controller.activeDetentIndex = index;
-  [TrueSheetLifecycleEvents emitWillPresent:_eventEmitter index:index position:position detent:detent];
+  if (!(_suppressPresentEvents && _presentEventGeneration == _generation)) {
+    [TrueSheetLifecycleEvents emitWillPresent:_eventEmitter index:index position:position detent:detent];
+  }
 }
 
 - (void)viewControllerDidPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
+  BOOL wasResume = _logicallyOpen;
   [_containerView setupKeyboardObserverWithViewController:_controller];
-  [TrueSheetLifecycleEvents emitDidPresent:_eventEmitter index:index position:position detent:detent];
+  if (!(_suppressPresentEvents && _presentEventGeneration == _generation)) {
+    [TrueSheetLifecycleEvents emitDidPresent:_eventEmitter index:index position:position detent:detent];
+  }
 
   if (_pendingPropsUpdate) {
     _pendingPropsUpdate = NO;
@@ -719,6 +853,24 @@ using namespace facebook::react;
   if (_pendingSizeChange) {
     _pendingSizeChange = NO;
     [self setupSheetDetentsForSizeChange];
+  }
+
+  _suppressPresentEvents = NO;
+  _presentEventGeneration = 0;
+  _logicallyOpen = NO;
+  if (wasResume) {
+    [self emitVisibilityChange:YES];
+  }
+
+  if (_applySuspendAfterPresent) {
+    _applySuspendAfterPresent = NO;
+    [self applySuspended:YES];
+  }
+
+  if (_applyDismissAfterPresent) {
+    TrueSheetCompletionBlock completion = _applyDismissAfterPresent;
+    _applyDismissAfterPresent = nil;
+    [self dismissAnimated:YES completion:completion];
   }
 }
 
@@ -743,14 +895,14 @@ using namespace facebook::react;
 }
 
 - (void)viewControllerWillDismiss {
-  if (!_dismissedByNavigation) {
+  if (!_dismissedByNavigation && !_dismissingForSuspension) {
     [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
   }
 }
 
 - (void)viewControllerDidDismiss {
   [_containerView cleanupKeyboardObserver];
-  if (!_dismissedByNavigation) {
+  if (!_dismissedByNavigation && !_dismissingForSuspension) {
     _dismissedByNavigation = NO;
     _pendingNavigationRepresent = NO;
 
@@ -761,19 +913,25 @@ using namespace facebook::react;
   // Our own dismissal finished — drain any present that was parked behind it. Runs after
   // the navigation gate so a swap-and-reopen replays regardless of dismissal cause.
   [self flushPendingPresent];
+  _dismissingForSuspension = NO;
 }
 
 - (void)viewControllerDidChangeDetent:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
   if (_controller.activeDetentIndex != index) {
     _controller.activeDetentIndex = index;
   }
-  [TrueSheetStateEvents emitDetentChange:_eventEmitter index:index position:position detent:detent];
+  if (!_dismissingForSuspension && !_suppressPresentEvents) {
+    [TrueSheetStateEvents emitDetentChange:_eventEmitter index:index position:position detent:detent];
+  }
 }
 
 - (void)viewControllerDidChangePosition:(CGFloat)index
                                position:(CGFloat)position
                                  detent:(CGFloat)detent
                                realtime:(BOOL)realtime {
+  if (_dismissingForSuspension || _suppressPresentEvents) {
+    return;
+  }
   [TrueSheetStateEvents emitPositionChange:_eventEmitter index:index position:position detent:detent realtime:realtime];
 }
 
@@ -804,20 +962,24 @@ using namespace facebook::react;
 
 - (void)presenterScreenWillDisappear {
   if (_controller.isPresented && !_controller.isBeingDismissed) {
+    _hideReasons |= TrueSheetHideReasonNavigation;
     _dismissedByNavigation = YES;
+    _logicallyOpen = YES;
+    _resumeEmitsPresentEvents = YES;
     [self dismissAnimated:YES completion:nil];
+  } else if (_logicallyOpen) {
+    _hideReasons |= TrueSheetHideReasonNavigation;
   }
 }
 
 - (void)presenterScreenWillAppear {
-  if (_dismissedByNavigation && !_controller.isPresented && !_controller.isBeingPresented) {
-    _dismissedByNavigation = NO;
+  _hideReasons &= ~TrueSheetHideReasonNavigation;
+  _dismissedByNavigation = NO;
 
-    if (self.window) {
-      [self presentAtIndex:_controller.activeDetentIndex animated:YES completion:nil];
-    } else {
-      _pendingNavigationRepresent = YES;
-    }
+  if (self.window) {
+    [self flushRepresentIfNeeded];
+  } else if (_logicallyOpen) {
+    _pendingNavigationRepresent = YES;
   }
 }
 
@@ -857,6 +1019,8 @@ using namespace facebook::react;
   _pendingPresentAnimated = animated;
   _pendingPresentCompletion = completion;
   _pendingPresentGeneration = _generation;
+  _pendingPresentSuppressesEvents = _nextPresentSuppressesEvents;
+  _nextPresentSuppressesEvents = NO;
 
   if (_isReplayingPendingPresent) {
     _pendingPresentAttempts = _currentReplayAttempts + 1;
@@ -878,6 +1042,7 @@ using namespace facebook::react;
   NSUInteger generation = _pendingPresentGeneration;
   NSUInteger attempts = _pendingPresentAttempts;
   CFTimeInterval deferredAt = _pendingPresentDeferredAt;
+  BOOL suppresses = _pendingPresentSuppressesEvents;
 
   _hasPendingPresent = NO;
   _pendingPresentCompletion = nil;
@@ -911,6 +1076,7 @@ using namespace facebook::react;
     strongSelf->_isReplayingPendingPresent = YES;
     strongSelf->_currentReplayAttempts = attempts;
     strongSelf->_currentReplayDeferredAt = deferredAt;
+    strongSelf->_nextPresentSuppressesEvents = suppresses;
     [strongSelf presentAtIndex:index animated:animated completion:completion];
     strongSelf->_isReplayingPendingPresent = NO;
   });
@@ -924,6 +1090,8 @@ using namespace facebook::react;
   TrueSheetCompletionBlock completion = _pendingPresentCompletion;
   _hasPendingPresent = NO;
   _pendingPresentCompletion = nil;
+  _suppressPresentEvents = NO;
+  _presentEventGeneration = 0;
 
   if (completion) {
     completion(NO, [self pendingPresentCancelledError:reason]);
@@ -946,6 +1114,72 @@ using namespace facebook::react;
 }
 
 #pragma mark - Private Helpers
+
+- (void)applySuspended:(BOOL)suspended {
+  if (suspended) {
+    _suspendedProp = YES;
+
+    if (_hasPendingPresent) {
+      _controller.activeDetentIndex = _pendingPresentIndex;
+      [self cancelPendingPresentWithReason:@"suspended"];
+      _logicallyOpen = YES;
+      _resumeEmitsPresentEvents = _controller.isPresented ? NO : YES;
+    }
+
+    if (_controller.isBeingPresented) {
+      _applySuspendAfterPresent = YES;
+      return;
+    }
+
+    if (_controller.isPresented) {
+      _logicallyOpen = YES;
+      _resumeEmitsPresentEvents = NO;
+      _hideReasons |= TrueSheetHideReasonSuspension;
+      _dismissingForSuspension = YES;
+      [self emitVisibilityChange:NO];
+      [self dismissAnimated:YES completion:nil];
+      return;
+    }
+
+    _hideReasons |= TrueSheetHideReasonSuspension;
+  } else {
+    _suspendedProp = NO;
+    _hideReasons &= ~TrueSheetHideReasonSuspension;
+    [self flushRepresentIfNeeded];
+  }
+}
+
+- (void)flushRepresentIfNeeded {
+  if (!(_logicallyOpen && _hideReasons == 0 && !_controller.isPresented && !_controller.isBeingPresented &&
+        self.window != nil)) {
+    return;
+  }
+
+  NSInteger index = _controller.activeDetentIndex;
+  if (index < 0 && _initialDetentIndex >= 0) {
+    index = _initialDetentIndex;
+  }
+  if (index < 0) {
+    index = 0;
+  }
+
+  // Suppress present events for this resume unless it is a first-ever presentation (which must
+  // emit normally). presentAtIndex: latches this at the real present, threading it through the
+  // slot if it defers — so a superseded or cancelled resume never leaks the suppression.
+  _nextPresentSuppressesEvents = !_resumeEmitsPresentEvents;
+
+  __weak __typeof(self) weakSelf = self;
+  [self presentAtIndex:index
+              animated:YES
+            completion:^(BOOL success, NSError *error) {
+              if (!success && error.code == 1002) {
+                // Timed out waiting for an in-flight transition; still logically open, retry.
+                dispatch_async(dispatch_get_main_queue(), ^{
+                  [weakSelf flushRepresentIfNeeded];
+                });
+              }
+            }];
+}
 
 - (void)setupScrollable {
   if (!_containerView)

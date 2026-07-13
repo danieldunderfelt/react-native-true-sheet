@@ -44,6 +44,17 @@
   emitter->onPositionChange(event);
 }
 
++ (void)emitVisibilityChange:(std::shared_ptr<const facebook::react::EventEmitter>)eventEmitter
+                     visible:(BOOL)visible {
+  if (!eventEmitter)
+    return;
+
+  auto emitter = std::static_pointer_cast<TrueSheetViewEventEmitter const>(eventEmitter);
+  TrueSheetViewEventEmitter::OnVisibilityChange event;
+  event.visible = static_cast<bool>(visible);
+  emitter->onVisibilityChange(event);
+}
+
 @end
 
 #endif  // RCT_NEW_ARCH_ENABLED

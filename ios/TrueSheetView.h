@@ -40,6 +40,8 @@ typedef void (^TrueSheetCompletionBlock)(BOOL success, NSError *_Nullable error)
 
 - (void)cancelPendingPresentWithReason:(NSString *)reason;
 
+- (BOOL)isLogicallyOpenWhileSuspended;
+
 @end
 
 NS_ASSUME_NONNULL_END

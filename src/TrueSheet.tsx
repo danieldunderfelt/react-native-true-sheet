@@ -378,6 +378,10 @@ export class TrueSheet
   }
 
   private handleBackPress(): boolean {
+    // Synchronous guard: a suspended sheet must let back through even before the
+    // native visibility-change event has flipped isSheetVisible.
+    if (this.props.suspended) return false;
+
     if (!this.isPresented || !this.isSheetVisible) return false;
 
     // When not dismissible, let back propagate (e.g. navigation goes back to the previous screen)
@@ -508,6 +512,7 @@ export class TrueSheet
       dimmed = true,
       initialDetentIndex = -1,
       initialDetentAnimated = true,
+      suspended = false,
       dimmedDetentIndex,
       backgroundBlur,
       blurOptions,
@@ -567,6 +572,7 @@ export class TrueSheet
         dimmedDetentIndex={dimmedDetentIndex}
         initialDetentIndex={initialDetentIndex}
         initialDetentAnimated={initialDetentAnimated}
+        suspended={suspended}
         dismissible={dismissible}
         draggable={draggable}
         maxContentHeight={maxContentHeight}
