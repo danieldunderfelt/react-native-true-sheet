@@ -1,0 +1,132 @@
+import type { ColorValue, ProcessedColorValue, ViewProps } from 'react-native';
+import type {
+  DirectEventHandler,
+  Double,
+  Int32,
+  WithDefault,
+} from 'react-native/Libraries/Types/CodegenTypes';
+import { codegenNativeComponent } from 'react-native';
+
+type GrabberOptionsType = Readonly<{
+  width?: Double;
+  height?: Double;
+  topMargin?: Double;
+  cornerRadius?: WithDefault<Double, -1>;
+  color?: ProcessedColorValue | null;
+  adaptive?: WithDefault<boolean, true>;
+}>;
+
+type BlurOptionsType = Readonly<{
+  intensity?: WithDefault<Double, -1>;
+  interaction?: WithDefault<boolean, true>;
+}>;
+
+type ScrollEdgeEffect = 'automatic' | 'hard' | 'soft' | 'hidden';
+
+type ScrollableOptionsType = Readonly<{
+  keyboardScrollOffset?: WithDefault<Double, 0>;
+  scrollingExpandsSheet?: WithDefault<boolean, true>;
+  topScrollEdgeEffect?: WithDefault<ScrollEdgeEffect, 'hidden'>;
+  bottomScrollEdgeEffect?: WithDefault<ScrollEdgeEffect, 'hidden'>;
+}>;
+
+type FooterOptionsType = Readonly<{
+  keyboardOffset?: WithDefault<Double, 0>;
+}>;
+
+export interface DetentInfoEventPayload {
+  index: Int32;
+  position: Double;
+  detent: Double;
+}
+
+export interface PositionChangeEventPayload {
+  index: Double;
+  position: Double;
+  detent: Double;
+  realtime: boolean;
+}
+
+export interface NativeProps extends ViewProps {
+  // Array properties
+  detents?: ReadonlyArray<Double>;
+
+  // Number properties - use 0 as default to avoid nil insertion
+  maxContentHeight?: WithDefault<Double, 0>;
+  maxContentWidth?: WithDefault<Double, 0>;
+  cornerRadius?: WithDefault<Double, -1>;
+  elevation?: WithDefault<Double, -1>;
+
+  // Color properties
+  backgroundColor?: ColorValue;
+  initialDetentIndex?: WithDefault<Int32, -1>;
+  dimmedDetentIndex?: WithDefault<Int32, 0>;
+
+  // String properties - use empty string as default to avoid nil insertion
+  backgroundBlur?: WithDefault<
+    | 'none'
+    | 'light'
+    | 'dark'
+    | 'default'
+    | 'extra-light'
+    | 'regular'
+    | 'prominent'
+    | 'system-ultra-thin-material'
+    | 'system-thin-material'
+    | 'system-material'
+    | 'system-thick-material'
+    | 'system-chrome-material'
+    | 'system-ultra-thin-material-light'
+    | 'system-thin-material-light'
+    | 'system-material-light'
+    | 'system-thick-material-light'
+    | 'system-chrome-material-light'
+    | 'system-ultra-thin-material-dark'
+    | 'system-thin-material-dark'
+    | 'system-material-dark'
+    | 'system-thick-material-dark'
+    | 'system-chrome-material-dark',
+    'none'
+  >;
+
+  anchor?: WithDefault<'left' | 'center' | 'right', 'center'>;
+  anchorOffset?: WithDefault<Double, 16>;
+  insetAdjustment?: WithDefault<'automatic' | 'never', 'automatic'>;
+
+  // Blur options
+  blurOptions?: BlurOptionsType;
+
+  // Boolean properties - match defaults from TrueSheet.types.ts
+  grabber?: WithDefault<boolean, true>;
+  grabberOptions?: GrabberOptionsType;
+  dismissible?: WithDefault<boolean, true>;
+  draggable?: WithDefault<boolean, true>;
+  dimmed?: WithDefault<boolean, true>;
+  initialDetentAnimated?: WithDefault<boolean, true>;
+  suspended?: WithDefault<boolean, false>;
+  scrollable?: WithDefault<boolean, false>;
+  scrollableOptions?: ScrollableOptionsType;
+  footerOptions?: FooterOptionsType;
+  presentation?: WithDefault<'page' | 'form', 'page'>;
+
+  // Event handlers
+  onMount?: DirectEventHandler<null>;
+  onWillPresent?: DirectEventHandler<DetentInfoEventPayload>;
+  onDidPresent?: DirectEventHandler<DetentInfoEventPayload>;
+  onWillDismiss?: DirectEventHandler<null>;
+  onDidDismiss?: DirectEventHandler<null>;
+  onDetentChange?: DirectEventHandler<DetentInfoEventPayload>;
+  onDragBegin?: DirectEventHandler<DetentInfoEventPayload>;
+  onDragChange?: DirectEventHandler<DetentInfoEventPayload>;
+  onDragEnd?: DirectEventHandler<DetentInfoEventPayload>;
+  onPositionChange?: DirectEventHandler<PositionChangeEventPayload>;
+  onWillFocus?: DirectEventHandler<null>;
+  onDidFocus?: DirectEventHandler<null>;
+  onWillBlur?: DirectEventHandler<null>;
+  onDidBlur?: DirectEventHandler<null>;
+  onVisibilityChange?: DirectEventHandler<Readonly<{ visible: boolean }>>;
+}
+
+export default codegenNativeComponent<NativeProps>('TrueSheetView', {
+  interfaceOnly: true,
+});

@@ -1,0 +1,45 @@
+import React from 'react';
+import type { DrawerDirection } from './types';
+interface DrawerContextValue {
+    drawerRef: React.RefObject<HTMLDivElement | null>;
+    overlayRef: React.RefObject<HTMLDivElement | null>;
+    onPress: (event: React.PointerEvent<HTMLDivElement>) => void;
+    onRelease: (event: React.PointerEvent<HTMLDivElement> | null) => void;
+    onDrag: (event: React.PointerEvent<HTMLDivElement>) => void;
+    onNestedDrag: (event: React.PointerEvent<HTMLDivElement>, percentageDragged: number) => void;
+    onNestedOpenChange: (o: boolean) => void;
+    onNestedRelease: (event: React.PointerEvent<HTMLDivElement>, open: boolean) => void;
+    dismissible: boolean;
+    isOpen: boolean;
+    isDragging: boolean;
+    keyboardIsOpen: React.MutableRefObject<boolean>;
+    snapPointsOffset: number[] | null;
+    snapPoints?: (number | string)[] | null;
+    activeSnapPointIndex?: number | null;
+    fadeFromIndex?: number;
+    modal: boolean;
+    shouldFade: boolean;
+    activeSnapPoint?: number | string | null;
+    setActiveSnapPoint: (o: number | string | null) => void;
+    closeDrawer: () => void;
+    openProp?: boolean;
+    onOpenChange?: (o: boolean) => void;
+    direction: DrawerDirection;
+    shouldScaleBackground: boolean;
+    setBackgroundColorOnScale: boolean;
+    noBodyStyles: boolean;
+    handleOnly?: boolean;
+    container?: HTMLElement | null;
+    autoFocus?: boolean;
+    shouldAnimate?: React.RefObject<boolean>;
+    onPositionChangeRef: React.RefObject<((position: number) => void) | undefined>;
+    setContentHeight: (height: number) => void;
+    detached: boolean;
+    detachedOffset: number;
+    detachedRadius: number;
+    detachedWrapperStyle?: React.CSSProperties;
+}
+export declare const DrawerContext: React.Context<DrawerContextValue>;
+export declare const useDrawerContext: () => DrawerContextValue;
+export {};
+//# sourceMappingURL=context.d.ts.map
