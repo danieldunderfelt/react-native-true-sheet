@@ -28,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
                     detent:(CGFloat)detent
                   realtime:(BOOL)realtime;
 
++ (void)emitVisibilityChange:(std::shared_ptr<const facebook::react::EventEmitter>)eventEmitter
+                     visible:(BOOL)visible;
+
 @end
 
 NS_ASSUME_NONNULL_END

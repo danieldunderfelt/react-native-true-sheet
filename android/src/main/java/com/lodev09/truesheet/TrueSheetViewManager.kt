@@ -141,6 +141,11 @@ class TrueSheetViewManager :
     view.setDismissible(dismissible)
   }
 
+  @ReactProp(name = "suspended", defaultBoolean = false)
+  override fun setSuspended(view: TrueSheetView, value: Boolean) {
+    view.suspendedProp = value
+  }
+
   @ReactProp(name = "draggable", defaultBoolean = true)
   override fun setDraggable(view: TrueSheetView, draggable: Boolean) {
     view.setDraggable(draggable)

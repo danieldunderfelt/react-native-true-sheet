@@ -125,14 +125,25 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   fun dismissAll(animated: Boolean, promise: Promise) {
     Handler(Looper.getMainLooper()).post {
       try {
+        fun dismissRegisteredSheets() {
+          for (view in viewRegistry.values.toList()) {
+            if (view.viewController.isPresented && !view.viewController.isBeingDismissed) {
+              view.dismiss(animated = false) { }
+            } else if (view.isLogicallyOpenWhileSuspended) {
+              view.dismiss(animated = false) { }
+            }
+          }
+          promise.resolve(null)
+        }
+
         val rootSheet = TrueSheetStackManager.getRootSheet()
         if (rootSheet == null) {
-          promise.resolve(null)
+          dismissRegisteredSheets()
           return@post
         }
 
         rootSheet.dismiss(animated) {
-          promise.resolve(null)
+          dismissRegisteredSheets()
         }
       } catch (e: Exception) {
         promise.reject("OPERATION_FAILED", "Failed to dismiss all sheets: ${e.message}", e)

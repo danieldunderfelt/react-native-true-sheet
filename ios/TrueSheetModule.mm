@@ -159,6 +159,14 @@ RCT_EXPORT_MODULE(TrueSheetModule)
         [view cancelPendingPresentWithReason:@"dismissAll"];
       }
 
+      // Close logically-open suspended sheets — they hold no native presentation, so the
+      // root-sheet dismissal below would otherwise leave them to resurface on resume.
+      for (TrueSheetView *view in viewRegistry.allValues) {
+        if ([view isLogicallyOpenWhileSuspended]) {
+          [view dismissAnimated:NO completion:nil];
+        }
+      }
+
       // Find the root presented sheet (one without a parent TrueSheet)
       TrueSheetView *rootSheet = nil;
 

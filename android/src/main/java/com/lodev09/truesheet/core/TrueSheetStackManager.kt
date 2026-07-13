@@ -140,7 +140,12 @@ object TrueSheetStackManager {
   fun isTopmostSheet(sheetView: TrueSheetView): Boolean {
     synchronized(presentedSheetStack) {
       val rootContainer = sheetView.rootContainerView
-      return presentedSheetStack.lastOrNull { it.rootContainerView == rootContainer } == sheetView
+      return presentedSheetStack.lastOrNull {
+        it.rootContainerView == rootContainer &&
+          it.viewController.isPresented &&
+          it.viewController.isSheetVisible &&
+          !it.viewController.isBeingDismissed
+      } == sheetView
     }
   }
 
@@ -162,7 +167,9 @@ object TrueSheetStackManager {
   @JvmStatic
   fun getRootSheet(): TrueSheetView? {
     synchronized(presentedSheetStack) {
-      val topmost = presentedSheetStack.lastOrNull { it.viewController.isPresented } ?: return null
+      val topmost = presentedSheetStack.lastOrNull {
+        it.viewController.isPresented && it.viewController.isSheetVisible
+      } ?: return null
 
       var current: TrueSheetView = topmost
       while (true) {
