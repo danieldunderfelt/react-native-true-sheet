@@ -38,6 +38,8 @@ typedef void (^TrueSheetCompletionBlock)(BOOL success, NSError *_Nullable error)
 
 - (void)dismissStackAnimated:(BOOL)animated completion:(nullable TrueSheetCompletionBlock)completion;
 
+- (void)cancelPendingPresentWithReason:(NSString *)reason;
+
 @end
 
 NS_ASSUME_NONNULL_END
