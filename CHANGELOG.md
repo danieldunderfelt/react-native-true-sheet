@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+<!-- Replace #XXX with the PR number and @author with the contributor handle before release. -->
+
+### 🎉 New features
+
+- **iOS**, **Android**: New `suspended` prop that steps a presented sheet aside natively — dismissed on iOS, hidden on Android — without reporting a close. The sheet stays logically presented and returns at its remembered detent when unset, so a full-screen native `Modal` can present over it (they share a presenter on iOS) and the sheet comes back cleanly. ([#XXX](https://github.com/lodev09/react-native-true-sheet/pull/XXX) by [@author](https://github.com/author))
+
+### 🐛 Bug fixes
+
+- **iOS**: Presenting a sheet while another sheet, RN `Modal`, or react-native-screens modal is mid-dismissal no longer silently fails and leaves `present()` pending forever. Overlapping present/dismiss is serialized behind the in-flight transition and replayed on completion; a wedged transition now rejects with `PRESENT_TIMEOUT`/`PRESENT_CANCELLED` instead of hanging. ([#XXX](https://github.com/lodev09/react-native-true-sheet/pull/XXX) by [@author](https://github.com/author))
+- **iOS**: Unmounting a presented sheet now dismisses only its own presenter, and teardown no longer walks to the presentation-chain root — so closing a sheet no longer tears down unrelated modals or a sibling sheet opened in the same transaction. ([#XXX](https://github.com/lodev09/react-native-true-sheet/pull/XXX) by [@author](https://github.com/author))
+- **Android**: A `present()` issued during the dismiss animation is queued and replayed after teardown instead of resolving as a false success; a dismissing sheet is no longer selected as a new sheet's stack parent (fixing the double-motion jerk), and dangling parent references are reparented so focus routing and `dismissAll()` survive a same-tick swap. ([#XXX](https://github.com/lodev09/react-native-true-sheet/pull/XXX) by [@author](https://github.com/author))
+- Closing one sheet and opening another in the same React transaction is now handled end to end: `present()` inside `onDidDismiss` keeps the sheet mounted, unmounting while a present is pending settles the promise instead of deadlocking, hardware back during teardown no longer throws, and `navigation.replace()` between sheet screens dismisses the old sheet before mounting the new one. ([#XXX](https://github.com/lodev09/react-native-true-sheet/pull/XXX) by [@author](https://github.com/author))
+
 ## 3.11.6
 
 ### 🐛 Bug fixes
