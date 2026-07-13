@@ -182,6 +182,46 @@ export const TrueSheetRouter = (
           return this.getStateForAction(state, StackActions.pop(popCount), options);
         }
 
+        case 'REPLACE': {
+          if (state.routes.length <= 1) {
+            return baseRouter.getStateForAction(state, action, options);
+          }
+
+          const { name, params } = action.payload;
+
+          if (!state.routeNames.includes(name)) {
+            return null;
+          }
+
+          const key =
+            'key' in action.payload && typeof action.payload.key === 'string'
+              ? action.payload.key
+              : `${name}-${nanoid()}`;
+          const defaultParams = options.routeParamList[name];
+          const closingIndex = state.routes.length - 1;
+
+          return {
+            ...state,
+            index: closingIndex,
+            routes: state.routes.map((route, i) =>
+              i === closingIndex
+                ? {
+                    ...route,
+                    closing: true,
+                    pendingReplace: {
+                      key,
+                      name,
+                      params:
+                        defaultParams !== undefined
+                          ? { ...defaultParams, ...params }
+                          : params,
+                    },
+                  }
+                : route
+            ),
+          };
+        }
+
         case 'REMOVE': {
           // Actually remove the closing route and all routes above it
           const routeKey = action.source;
@@ -195,6 +235,11 @@ export const TrueSheetRouter = (
 
           // Remove the route and all routes above it (they were dismissed together)
           const routes = state.routes.filter((_, i) => i < routeIndex);
+          const pendingReplace = state.routes[routeIndex]?.pendingReplace;
+
+          if (pendingReplace) {
+            routes.push(pendingReplace);
+          }
 
           return {
             ...state,
