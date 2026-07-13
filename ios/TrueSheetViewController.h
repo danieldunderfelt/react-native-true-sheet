@@ -76,6 +76,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) CGFloat footerKeyboardOffset;
 @property (nonatomic, assign) BOOL dismissible;
 @property (nonatomic, assign) BOOL isPresented;
+@property (nonatomic, assign) BOOL orphanedAfterUnmount;
 @property (nonatomic, assign) NSInteger activeDetentIndex;
 @property (nonatomic, readonly) BOOL isTopmostPresentedController;
 @property (nonatomic, weak, nullable) UIView *accessibilityContentView;

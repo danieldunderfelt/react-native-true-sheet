@@ -103,6 +103,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     _lastEmittedPositionState = (TrueSheetPositionState){0, 0, 0};
     _isDragging = NO;
     _isPresented = NO;
+    _orphanedAfterUnmount = NO;
     _isTransitioning = NO;
     _isWillDismissEmitted = NO;
     _pendingContentSizeChange = NO;
@@ -400,6 +401,14 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
                               // Reclaim the window accessibility override once nothing
                               // else is presented over us.
                               if (self.isPresented && self.presentedViewController == nil) {
+                                // We are an ownerless zombie kept alive only because a child
+                                // was presented over us when our owning view unmounted. Now
+                                // that the child is gone, remove ourselves without animation.
+                                if (self.orphanedAfterUnmount) {
+                                  self.orphanedAfterUnmount = NO;
+                                  [self.presentingViewController dismissViewControllerAnimated:NO completion:nil];
+                                  return;
+                                }
                                 [self setupAccessibilityContainer];
                               }
                             }];
@@ -427,6 +436,15 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [_parentSheetController.delegate viewControllerDidFocus];
     [_parentSheetController setSheetAccessibilityElementsHidden:NO];
     [_parentSheetController setupAccessibilityContainer];
+
+    // If our parent is an ownerless zombie (its owning view unmounted while we were
+    // presented over it), it can now remove itself — covers our own drag-dismissal,
+    // which does not route through the parent's dismissViewControllerAnimated: override.
+    if (_parentSheetController.orphanedAfterUnmount) {
+      _parentSheetController.orphanedAfterUnmount = NO;
+      [_parentSheetController.presentingViewController dismissViewControllerAnimated:NO completion:nil];
+    }
+
     _parentSheetController = nil;
 
     [self.delegate viewControllerDidBlur];
