@@ -42,6 +42,13 @@ typedef void (^TrueSheetCompletionBlock)(BOOL success, NSError *_Nullable error)
 
 - (BOOL)isLogicallyOpenWhileSuspended;
 
+// Imperative suspension (TrueSheet.suspendAll / unsuspendAll). Suspends only this sheet if it
+// is currently open (presented, mid-presentation, or logically open); returns whether it was
+// captured. Independent of the `suspended` prop — the sheet stays suspended while either
+// source holds it.
+- (BOOL)suspendFromModule;
+- (void)resumeFromModule;
+
 @end
 
 NS_ASSUME_NONNULL_END

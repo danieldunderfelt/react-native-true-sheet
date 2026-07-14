@@ -153,6 +153,39 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * Suspend every currently open sheet. Each captured sheet hides natively while staying
+   * logically presented; sheets presented after this call are unaffected.
+   */
+  @ReactMethod
+  fun suspendAll(promise: Promise) {
+    Handler(Looper.getMainLooper()).post {
+      try {
+        for (view in viewRegistry.values.toList()) {
+          view.suspendFromModule()
+        }
+        promise.resolve(null)
+      } catch (e: Exception) {
+        promise.reject("OPERATION_FAILED", "Failed to suspend sheets: ${e.message}", e)
+      }
+    }
+  }
+
+  /** Re-present the sheets captured by [suspendAll] at their remembered detents. */
+  @ReactMethod
+  fun unsuspendAll(promise: Promise) {
+    Handler(Looper.getMainLooper()).post {
+      try {
+        for (view in viewRegistry.values.toList()) {
+          view.resumeFromModule()
+        }
+        promise.resolve(null)
+      } catch (e: Exception) {
+        promise.reject("OPERATION_FAILED", "Failed to resume sheets: ${e.message}", e)
+      }
+    }
+  }
+
   @ReactMethod
   fun handleBackPress(viewTag: Double, promise: Promise) {
     val tag = viewTag.toInt()

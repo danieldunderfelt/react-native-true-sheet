@@ -679,4 +679,15 @@ export interface TrueSheetStaticMethods {
    * Dismiss every presented sheet, from the top of the stack downward.
    */
   dismissAll(animated?: boolean): Promise<void>;
+
+  /**
+   * Suspend every currently open sheet: each steps aside natively while staying
+   * logically presented. Sheets presented after this call are unaffected.
+   */
+  suspendAll(): Promise<void>;
+
+  /**
+   * Re-present the sheets captured by `suspendAll` at their remembered detents.
+   */
+  unsuspendAll(): Promise<void>;
 }

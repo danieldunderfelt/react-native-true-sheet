@@ -277,6 +277,31 @@ export class TrueSheet
     return TrueSheetModule?.dismissAll(animated);
   }
 
+  /**
+   * Suspend all currently open sheets. Each captured sheet steps aside natively —
+   * dismissed on iOS, hidden on Android — while staying logically presented: no dismiss
+   * events fire, content stays mounted, and the active detent is remembered.
+   *
+   * Sheets presented *after* this call are unaffected, so a flow (e.g. a modal route)
+   * that suspends the sheets beneath it can still open sheets of its own.
+   *
+   * Restore the captured sheets with `unsuspendAll`.
+   * @returns Promise that resolves when suspension has been initiated
+   */
+  public static async suspendAll(): Promise<void> {
+    return TrueSheetModule?.suspendAll();
+  }
+
+  /**
+   * Re-present the sheets captured by `suspendAll`, restoring each at its remembered
+   * detent without re-emitting present events. Safe to call while other transitions
+   * (e.g. a closing modal) are still in flight — re-presentation waits for them.
+   * @returns Promise that resolves when re-presentation has been initiated
+   */
+  public static async unsuspendAll(): Promise<void> {
+    return TrueSheetModule?.unsuspendAll();
+  }
+
   private registerInstance(): void {
     if (this.props.name) {
       TrueSheet.instances[this.props.name] = this;

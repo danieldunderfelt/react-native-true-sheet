@@ -77,6 +77,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL dismissible;
 @property (nonatomic, assign) BOOL isPresented;
 @property (nonatomic, assign) BOOL orphanedAfterUnmount;
+
+// Set when a dismissal was initiated by the presenter chain going away (e.g. a modal route
+// closing underneath the sheet) rather than by the sheet itself. A parent TrueSheet dismissing
+// its stack does not count. The owning view reads this to keep the sheet logically open.
+@property (nonatomic, assign) BOOL dismissedWithPresenter;
 @property (nonatomic, assign) NSInteger activeDetentIndex;
 @property (nonatomic, readonly) BOOL isTopmostPresentedController;
 @property (nonatomic, weak, nullable) UIView *accessibilityContentView;
@@ -94,6 +99,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setupSheetDetentsForDetentsChange;
 - (void)setupDraggable;
 - (void)setupAnchorViewInView:(UIView *)parentView;
+- (void)attemptOrphanTeardown;
+- (void)verifyDimmingAfterPresentation;
 
 - (void)beginInteractiveDismiss;
 - (void)updateInteractiveDismiss:(CGFloat)progress;

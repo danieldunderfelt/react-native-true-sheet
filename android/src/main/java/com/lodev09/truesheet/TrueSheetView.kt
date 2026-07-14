@@ -45,10 +45,16 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   var initialDetentAnimated: Boolean = true
   private var didInitiallyPresent: Boolean = false
   var suspendedProp: Boolean = false
+  private var suspendedByModule: Boolean = false
   private var logicallyOpenWhileSuspended: Boolean = false
   private var resumeDetentIndex: Int = -1
   private var lastAppliedSuspended: Boolean = false
   private var applySuspendedAfterPresent: Boolean = false
+
+  // The sheet is suspended while either source holds it: the `suspended` prop or an
+  // imperative TrueSheet.suspendAll() capture.
+  private val isSuspensionRequested: Boolean
+    get() = suspendedProp || suspendedByModule
 
   internal val isLogicallyOpenWhileSuspended: Boolean
     get() = logicallyOpenWhileSuspended
@@ -116,7 +122,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
     super.onAttachedToWindow()
 
     if (initialDetentIndex >= 0 && !didInitiallyPresent) {
-      if (suspendedProp) {
+      if (isSuspensionRequested) {
         logicallyOpenWhileSuspended = true
         resumeDetentIndex = initialDetentIndex
         return
@@ -185,6 +191,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   fun onDropInstance() {
     cancelPendingOps()
     logicallyOpenWhileSuspended = false
+    suspendedByModule = false
     resumeDetentIndex = -1
     applySuspendedAfterPresent = false
     reactContext.removeLifecycleEventListener(this)
@@ -209,10 +216,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   fun finalizeUpdates() {
     setupScrollable()
 
-    if (lastAppliedSuspended != suspendedProp) {
-      lastAppliedSuspended = suspendedProp
-      applySuspended(suspendedProp)
-    }
+    reconcileSuspension()
 
     if (viewController.isPresented) {
       viewController.sheetView?.setupBackground()
@@ -383,7 +387,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   @UiThread
   fun present(detentIndex: Int, animated: Boolean = true, promiseCallback: () -> Unit) {
-    if (suspendedProp) {
+    if (isSuspensionRequested) {
       if (!viewController.isPresented) {
         logicallyOpenWhileSuspended = true
       }
@@ -429,6 +433,42 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
     viewController.presentPromise = promiseCallback
     viewController.present(detentIndex, animated)
+  }
+
+  @UiThread
+  private fun reconcileSuspension() {
+    val suspended = isSuspensionRequested
+    if (lastAppliedSuspended == suspended) return
+    lastAppliedSuspended = suspended
+    applySuspended(suspended)
+  }
+
+  /**
+   * Imperative suspension (TrueSheet.suspendAll). Captures this sheet only if it is open in
+   * some form — presented, mid-presentation, parked behind a dismissal, or logically open —
+   * so sheets presented after the call are unaffected. Returns whether it was captured.
+   */
+  @UiThread
+  internal fun suspendFromModule(): Boolean {
+    if (suspendedByModule) return true
+
+    val open = viewController.isPresented ||
+      viewController.isPresentInFlight ||
+      pendingPresentReplay != null ||
+      logicallyOpenWhileSuspended
+    if (!open) return false
+
+    suspendedByModule = true
+    reconcileSuspension()
+    return true
+  }
+
+  /** Releases a TrueSheet.suspendAll capture and re-presents if no other source holds it. */
+  @UiThread
+  internal fun resumeFromModule() {
+    if (!suspendedByModule) return
+    suspendedByModule = false
+    reconcileSuspension()
   }
 
   @UiThread
@@ -504,7 +544,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   internal fun applyDeferredSuspensionAfterPresent() {
     if (!applySuspendedAfterPresent) return
     applySuspendedAfterPresent = false
-    applySuspended(suspendedProp)
+    applySuspended(isSuspensionRequested)
   }
 
   @UiThread
@@ -563,7 +603,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   @UiThread
   fun resize(detentIndex: Int, promiseCallback: () -> Unit) {
-    if (suspendedProp) {
+    if (isSuspensionRequested) {
       resumeDetentIndex = detentIndex
       promiseCallback()
       return

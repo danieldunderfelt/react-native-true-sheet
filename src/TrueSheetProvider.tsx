@@ -29,5 +29,7 @@ export function useTrueSheet(): TrueSheetStaticMethods {
     dismissStack: TrueSheet.dismissStack,
     resize: TrueSheet.resize,
     dismissAll: TrueSheet.dismissAll,
+    suspendAll: TrueSheet.suspendAll,
+    unsuspendAll: TrueSheet.unsuspendAll,
   };
 }

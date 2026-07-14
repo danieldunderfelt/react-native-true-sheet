@@ -84,7 +84,10 @@ RCT_EXPORT_MODULE(TrueSheetModule)
     TrueSheetView *trueSheetView = [TrueSheetModule getTrueSheetViewByTag:@((NSInteger)viewTag)];
 
     if (!trueSheetView) {
-      reject(@"SHEET_NOT_FOUND", [NSString stringWithFormat:@"No sheet found with tag %d", (int)viewTag], nil);
+      // The view was already recycled/unregistered (e.g. its route was torn down). Dismissing a
+      // sheet that no longer exists is a no-op success, not an error — resolving here avoids a
+      // flood of uncaught SHEET_NOT_FOUND rejections during navigation teardown.
+      resolve(nil);
       return;
     }
 
@@ -107,7 +110,8 @@ RCT_EXPORT_MODULE(TrueSheetModule)
     TrueSheetView *trueSheetView = [TrueSheetModule getTrueSheetViewByTag:@((NSInteger)viewTag)];
 
     if (!trueSheetView) {
-      reject(@"SHEET_NOT_FOUND", [NSString stringWithFormat:@"No sheet found with tag %d", (int)viewTag], nil);
+      // No sheet (already gone) means nothing is stacked on top of it — no-op success.
+      resolve(nil);
       return;
     }
 
@@ -149,6 +153,30 @@ RCT_EXPORT_MODULE(TrueSheetModule)
 - (void)handleBackPress:(double)viewTag resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   // No-op on iOS — no hardware back button
   resolve(nil);
+}
+
+- (void)suspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  RCTExecuteOnMainQueue(^{
+    @synchronized(viewRegistry) {
+      // Captures only sheets that are currently open; each captured view flags itself so
+      // unsuspendAll can resume exactly that set. Sheets presented afterwards are unaffected.
+      for (TrueSheetView *view in viewRegistry.allValues) {
+        [view suspendFromModule];
+      }
+    }
+    resolve(nil);
+  });
+}
+
+- (void)unsuspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  RCTExecuteOnMainQueue(^{
+    @synchronized(viewRegistry) {
+      for (TrueSheetView *view in viewRegistry.allValues) {
+        [view resumeFromModule];
+      }
+    }
+    resolve(nil);
+  });
 }
 
 - (void)dismissAll:(BOOL)animated resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
@@ -220,6 +248,12 @@ RCT_EXPORT_MODULE(TrueSheetModule)
   }
 
   @synchronized(viewRegistry) {
+    // Drop any stale keys still pointing at this reused view (Fabric recycles the instance across
+    // tags). Without this a previous incarnation's tag would keep resolving to the new sheet.
+    NSArray<NSNumber *> *staleTags = [viewRegistry allKeysForObject:view];
+    for (NSNumber *staleTag in staleTags) {
+      [viewRegistry removeObjectForKey:staleTag];
+    }
     viewRegistry[tag] = view;
   }
 }
