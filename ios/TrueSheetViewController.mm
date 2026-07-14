@@ -655,9 +655,16 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   // Capture synchronously (presentingViewController is severed once the transition completes):
   // when the presenter itself is being dismissed, the sheet is going down as collateral of a
-  // chain teardown, not because anyone closed it.
-  if (self.isBeingDismissed) {
+  // chain teardown, not because anyone closed it. Walk through parent TrueSheets that are
+  // dismissing to the outermost non-sheet presenter, so every sheet of a stack survives an
+  // outer modal closing — while a parent sheet's own dismiss() (whose outer presenter is NOT
+  // dismissing) keeps its stack-close semantics. A user mid-drag is dismissing the sheet
+  // themselves; never classify that as teardown.
+  if (self.isBeingDismissed && !_isDragging) {
     UIViewController *presenter = self.presentingViewController;
+    while ([presenter isKindOfClass:[TrueSheetViewController class]] && presenter.isBeingDismissed) {
+      presenter = presenter.presentingViewController;
+    }
     if (presenter.isBeingDismissed && ![presenter isKindOfClass:[TrueSheetViewController class]]) {
       _dismissedWithPresenter = YES;
     }

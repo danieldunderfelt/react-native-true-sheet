@@ -106,6 +106,14 @@ object TrueSheetStackManager {
     }
   }
 
+  /** Returns a snapshot of presented sheets ordered from bottom-most to top-most. */
+  @JvmStatic
+  fun getPresentedSheetsInStackOrder(): List<TrueSheetView> {
+    synchronized(presentedSheetStack) {
+      return presentedSheetStack.toList()
+    }
+  }
+
   @JvmStatic
   fun removeSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {

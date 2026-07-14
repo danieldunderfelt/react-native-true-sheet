@@ -40,6 +40,8 @@ typedef void (^TrueSheetCompletionBlock)(BOOL success, NSError *_Nullable error)
 
 - (void)cancelPendingPresentWithReason:(NSString *)reason;
 
+- (void)cancelPendingContentPresentWithReason:(NSString *)reason;
+
 - (BOOL)isLogicallyOpenWhileSuspended;
 
 // Imperative suspension (TrueSheet.suspendAll / unsuspendAll). Suspends only this sheet if it

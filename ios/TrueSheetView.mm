@@ -803,10 +803,12 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   [self cancelPendingPresentWithReason:@"dismissed"];
   [self cancelPendingContentPresentWithReason:@"dismissed"];
 
-  if (_dismissedByPresenterTeardown) {
+  if (_dismissedByPresenterTeardown && !_dismissingForSuspension && !_dismissedByNavigation) {
     // Explicit dismiss while the presenter is structurally tearing the sheet down: convert the
     // silent hide into a real close. Emit the will-dismiss that the teardown path suppressed;
-    // viewControllerDidDismiss then completes the pair through its normal branch.
+    // viewControllerDidDismiss then completes the pair through its normal branch. Internal
+    // dismisses (suspension, navigation) are excluded — they intentionally keep the sheet
+    // logically open and must not un-mark the teardown.
     _dismissedByPresenterTeardown = NO;
     _controller.dismissedWithPresenter = NO;
     _logicallyOpen = NO;
@@ -837,7 +839,26 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   }
 
   if (_controller.isBeingDismissed || !_controller.isPresented) {
-    RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
+    if (_controller.isBeingDismissed && _controller.dismissedWithPresenter && !_dismissedByPresenterTeardown) {
+      // Explicit dismiss won the race against teardown classification (the async delegate
+      // callback that would mark this teardown hasn't run yet). Clearing the native flag
+      // lets the in-flight dismissal emit its normal event pair and prevents the silent
+      // re-present.
+      _controller.dismissedWithPresenter = NO;
+      _logicallyOpen = NO;
+      _resumeEmitsPresentEvents = NO;
+    } else if (_controller.isBeingDismissed && _dismissingForSuspension) {
+      // Explicit close while the suspension hide is still animating: the hide suppresses
+      // its own lifecycle events, so emit the close pair here and drop the logical-open
+      // state — the sheet must not return on resume.
+      _logicallyOpen = NO;
+      _resumeEmitsPresentEvents = NO;
+      _controller.activeDetentIndex = -1;
+      [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
+      [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
+    } else {
+      RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
+    }
 
     if (completion) {
       completion(YES, nil);
@@ -1362,6 +1383,15 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 - (BOOL)suspendFromModule {
   if (_suspendedByModule) {
     return YES;
+  }
+
+  // An ordinary close already in flight must not be captured — suspendAll would resurrect a
+  // sheet the app just dismissed (isPresented stays YES throughout an animated dismissal).
+  // Structural hides (navigation, presenter teardown, suspension) carry logical-open state,
+  // a pending present, or the native teardown flag, and stay capturable.
+  if (_controller.isBeingDismissed && !_logicallyOpen && !_hasPendingPresent && !_hasPendingContentPresent &&
+      !_controller.dismissedWithPresenter) {
+    return NO;
   }
 
   // Only capture sheets that are open in some form — presented, mid-presentation, parked

@@ -182,9 +182,11 @@ RCT_EXPORT_MODULE(TrueSheetModule)
 - (void)dismissAll:(BOOL)animated resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   RCTExecuteOnMainQueue(^{
     @synchronized(viewRegistry) {
-      // No parked present may resurrect a sheet mid-dismissAll.
+      // No parked present may resurrect a sheet mid-dismissAll — including one still
+      // waiting for its content to mount, which would otherwise present when it arrives.
       for (TrueSheetView *view in viewRegistry.allValues) {
         [view cancelPendingPresentWithReason:@"dismissAll"];
+        [view cancelPendingContentPresentWithReason:@"dismissAll"];
       }
 
       // Close logically-open suspended sheets — they hold no native presentation, so the

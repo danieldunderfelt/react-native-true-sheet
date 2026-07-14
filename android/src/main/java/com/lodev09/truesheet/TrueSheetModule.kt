@@ -7,6 +7,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.module.annotations.ReactModule
 import com.facebook.react.turbomodule.core.interfaces.TurboModule
+import com.facebook.react.uimanager.IllegalViewOperationException
 import com.facebook.react.uimanager.UIManagerHelper
 import com.lodev09.truesheet.core.TrueSheetStackManager
 import java.util.concurrent.ConcurrentHashMap
@@ -58,7 +59,6 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
    *
    * @param viewTag Native view tag of the sheet component
    * @param promise Promise that resolves when sheet is fully dismissed
-   * @throws VIEW_NOT_FOUND if the view with the given tag is not found
    * @throws INVALID_VIEW_TYPE if the view is not a TrueSheetView
    * @throws OPERATION_FAILED if the operation fails for any other reason
    */
@@ -66,7 +66,7 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   fun dismissByRef(viewTag: Double, animated: Boolean, promise: Promise) {
     val tag = viewTag.toInt()
 
-    withTrueSheetView(tag, promise) { view ->
+    withTrueSheetView(tag, promise, resolveIfMissing = true) { view ->
       view.dismiss(animated) {
         promise.resolve(null)
       }
@@ -78,7 +78,6 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
    *
    * @param viewTag Native view tag of the sheet component
    * @param promise Promise that resolves when all child sheets are fully dismissed
-   * @throws VIEW_NOT_FOUND if the view with the given tag is not found
    * @throws INVALID_VIEW_TYPE if the view is not a TrueSheetView
    * @throws OPERATION_FAILED if the operation fails for any other reason
    */
@@ -86,7 +85,7 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   fun dismissStackByRef(viewTag: Double, animated: Boolean, promise: Promise) {
     val tag = viewTag.toInt()
 
-    withTrueSheetView(tag, promise) { view ->
+    withTrueSheetView(tag, promise, resolveIfMissing = true) { view ->
       view.dismissStack(animated) {
         promise.resolve(null)
       }
@@ -161,8 +160,19 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   fun suspendAll(promise: Promise) {
     Handler(Looper.getMainLooper()).post {
       try {
-        for (view in viewRegistry.values.toList()) {
-          view.suspendFromModule()
+        val registeredViews = viewRegistry.values.toList()
+        val capturedViews = registeredViews.filter { it.markSuspendedFromModule() }
+        val remainingViews = capturedViews.toMutableSet()
+
+        for (view in TrueSheetStackManager.getPresentedSheetsInStackOrder().asReversed()) {
+          if (remainingViews.remove(view)) {
+            view.suspendFromModule()
+          }
+        }
+        for (view in capturedViews) {
+          if (remainingViews.remove(view)) {
+            view.suspendFromModule()
+          }
         }
         promise.resolve(null)
       } catch (e: Exception) {
@@ -176,8 +186,19 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   fun unsuspendAll(promise: Promise) {
     Handler(Looper.getMainLooper()).post {
       try {
-        for (view in viewRegistry.values.toList()) {
-          view.resumeFromModule()
+        val registeredViews = viewRegistry.values.toList()
+        val capturedViews = registeredViews.filter { it.isSuspendedByModule }
+        val remainingViews = capturedViews.toMutableSet()
+
+        for (view in TrueSheetStackManager.getPresentedSheetsInStackOrder()) {
+          if (remainingViews.remove(view)) {
+            view.resumeFromModule()
+          }
+        }
+        for (view in capturedViews) {
+          if (remainingViews.remove(view)) {
+            view.resumeFromModule()
+          }
         }
         promise.resolve(null)
       } catch (e: Exception) {
@@ -199,7 +220,12 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   /**
    * Helper method to get TrueSheetView by tag and execute closure
    */
-  private fun withTrueSheetView(tag: Int, promise: Promise, closure: (view: TrueSheetView) -> Unit) {
+  private fun withTrueSheetView(
+    tag: Int,
+    promise: Promise,
+    resolveIfMissing: Boolean = false,
+    closure: (view: TrueSheetView) -> Unit
+  ) {
     Handler(Looper.getMainLooper()).post {
       try {
         // First try to get from registry (faster)
@@ -208,7 +234,11 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
         // Fallback to UIManager resolution
         if (view == null) {
           val manager = UIManagerHelper.getUIManagerForReactTag(reactApplicationContext, tag)
-          val resolvedView = manager?.resolveView(tag)
+          val resolvedView = try {
+            manager?.resolveView(tag)
+          } catch (_: IllegalViewOperationException) {
+            null
+          }
 
           if (resolvedView is TrueSheetView) {
             view = resolvedView
@@ -222,7 +252,11 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
         }
 
         if (view == null) {
-          promise.reject("VIEW_NOT_FOUND", "TrueSheetView with tag $tag not found")
+          if (resolveIfMissing) {
+            promise.resolve(null)
+          } else {
+            promise.reject("VIEW_NOT_FOUND", "TrueSheetView with tag $tag not found")
+          }
           return@post
         }
 

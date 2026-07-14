@@ -147,6 +147,32 @@ await TrueSheet.dismissAll(false)
 This only dismisses sheets in the current presentation context. Sheets presented behind a modal (e.g., React Navigation modal or React Native Modal) will not be affected.
 :::
 
+### `suspendAll`
+
+Suspends every sheet that is open at the time of the call. Each captured sheet steps aside natively — dismissed on iOS, hidden on Android — while staying **logically presented**: no dismiss events fire, content stays mounted, and the active detent is remembered.
+
+Sheets presented *after* the call are unaffected, so a flow that suspends the sheets beneath it (e.g. before opening a full-screen modal) can still open sheets of its own.
+
+```tsx
+await TrueSheet.suspendAll()
+
+// ... present a full-screen modal, navigate, etc.
+```
+
+:::note
+Suspension is independent of the [`suspended`](configuration#suspended) prop — a sheet stays suspended while *either* source holds it. Calling `dismiss()` on a captured sheet closes it for real; it will not return on `unsuspendAll()`.
+:::
+
+### `unsuspendAll`
+
+Re-presents the sheets captured by `suspendAll`, restoring each at its remembered detent without re-emitting present events. Safe to call while other transitions (e.g. a closing modal) are still in flight — re-presentation waits for them to settle.
+
+```tsx
+await TrueSheet.unsuspendAll()
+```
+
+On web, both methods are no-ops — suspension exists to step aside for native modal presentations, which have no web equivalent.
+
 ### Web
 
 Static methods are not supported on web. Use the `useTrueSheet()` hook instead.
@@ -154,7 +180,8 @@ Static methods are not supported on web. Use the `useTrueSheet()` hook instead.
 ```tsx
 import { useTrueSheet } from '@lodev09/react-native-true-sheet'
 
-const { present, dismiss, dismissStack, resize, dismissAll } = useTrueSheet()
+const { present, dismiss, dismissStack, resize, dismissAll, suspendAll, unsuspendAll } =
+  useTrueSheet()
 
 await present('my-sheet')
 await dismiss('my-sheet')

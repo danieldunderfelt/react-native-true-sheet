@@ -212,9 +212,7 @@ export const TrueSheetRouter = (
                       key,
                       name,
                       params:
-                        defaultParams !== undefined
-                          ? { ...defaultParams, ...params }
-                          : params,
+                        defaultParams !== undefined ? { ...defaultParams, ...params } : params,
                     },
                   }
                 : route
