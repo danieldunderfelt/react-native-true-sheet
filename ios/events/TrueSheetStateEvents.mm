@@ -44,8 +44,7 @@
   emitter->onPositionChange(event);
 }
 
-+ (void)emitVisibilityChange:(std::shared_ptr<const facebook::react::EventEmitter>)eventEmitter
-                     visible:(BOOL)visible {
++ (void)emitVisibilityChange:(std::shared_ptr<const facebook::react::EventEmitter>)eventEmitter visible:(BOOL)visible {
   if (!eventEmitter)
     return;
 

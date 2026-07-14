@@ -220,12 +220,7 @@ class TrueSheetModule(reactContext: ReactApplicationContext) :
   /**
    * Helper method to get TrueSheetView by tag and execute closure
    */
-  private fun withTrueSheetView(
-    tag: Int,
-    promise: Promise,
-    resolveIfMissing: Boolean = false,
-    closure: (view: TrueSheetView) -> Unit
-  ) {
+  private fun withTrueSheetView(tag: Int, promise: Promise, resolveIfMissing: Boolean = false, closure: (view: TrueSheetView) -> Unit) {
     Handler(Looper.getMainLooper()).post {
       try {
         // First try to get from registry (faster)

@@ -35,11 +35,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   TrueSheetContainerViewDelegate,
   RNScreensEventObserverDelegate {
 
-  private data class PendingContentPresent(
-    val detentIndex: Int,
-    val animated: Boolean,
-    val promiseCallback: () -> Unit
-  )
+  private data class PendingContentPresent(val detentIndex: Int, val animated: Boolean, val promiseCallback: () -> Unit)
 
   // ==================== Properties ====================
 
@@ -81,6 +77,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   // Debounce flag to coalesce rapid layout changes into a single sheet update
   private var isSheetUpdatePending: Boolean = false
+
   // A present() issued while a dismiss is in flight is parked here: `pendingPresentReplay`
   // re-invokes present() once teardown completes; `pendingPresentResolve` is that present's
   // JS promise callback, invoked directly if the parked present is superseded before it replays.
@@ -395,11 +392,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
     }
   }
 
-  private fun storePendingContentPresent(
-    detentIndex: Int,
-    animated: Boolean,
-    promiseCallback: () -> Unit
-  ) {
+  private fun storePendingContentPresent(detentIndex: Int, animated: Boolean, promiseCallback: () -> Unit) {
     cancelPendingContentPresent()
     pendingContentPresent = PendingContentPresent(detentIndex, animated, promiseCallback)
   }
@@ -497,8 +490,10 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
     val hasPendingPresent = pendingPresentReplay != null || pendingContentPresent != null
     val open = logicallyOpenWhileSuspended ||
       hasPendingPresent ||
-      (!viewController.isBeingDismissed &&
-        (viewController.isPresented || viewController.isPresentInFlight))
+      (
+        !viewController.isBeingDismissed &&
+          (viewController.isPresented || viewController.isPresentInFlight)
+        )
     if (!open) return false
 
     suspendedByModule = true

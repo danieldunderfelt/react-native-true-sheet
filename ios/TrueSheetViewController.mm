@@ -1204,7 +1204,6 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     UISheetPresentationControllerDetentIdentifier forceUndimmed =
       sheet.detents.lastObject.identifier ?: UISheetPresentationControllerDetentIdentifierLarge;
 
-    NSLog(@"TSTRACE dim-repair system dim missing — toggling largestUndimmedDetentIdentifier");
     [sheet animateChanges:^{
       sheet.largestUndimmedDetentIdentifier = forceUndimmed;
     }];
@@ -1225,13 +1224,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
         }
 
         if ([self hasVisibleSystemDimmingView]) {
-          NSLog(@"TSTRACE dim-repair toggle restored the system dimming view");
           [self removeFallbackDimmingView];
         } else if ([self.dimmedDetentIndex integerValue] == 0) {
           // Only the always-dim policy gets the fallback: a detent-dependent fallback would
           // need its alpha driven from the interactive position tracker to not visibly
           // disagree with UIKit during drags.
-          NSLog(@"TSTRACE dim-repair toggle failed — installing fallback dimming view");
           [self installFallbackDimmingView];
         }
       });
@@ -1262,9 +1259,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
   dimmingView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.2];
   dimmingView.accessibilityElementsHidden = YES;
-  [dimmingView addTarget:self
-                  action:@selector(handleFallbackDimmingTap)
-        forControlEvents:UIControlEventTouchUpInside];
+  [dimmingView addTarget:self action:@selector(handleFallbackDimmingTap) forControlEvents:UIControlEventTouchUpInside];
 
   [container insertSubview:dimmingView belowSubview:presentedRoot];
   _fallbackDimmingView = dimmingView;

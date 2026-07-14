@@ -38,9 +38,6 @@
 
 using namespace facebook::react;
 
-// TEMPORARY diagnostic tracing — remove after diagnosing the empty-sheet-on-navigation bug.
-#define TSLOG(fmt, ...) NSLog((@"TSTRACE tag=%ld " fmt), (long)self.tag, ##__VA_ARGS__)
-
 typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   TrueSheetHideReasonNavigation = 1 << 0,
   TrueSheetHideReasonSuspension = 1 << 1,
@@ -158,9 +155,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 - (void)didMoveToWindow {
   [super didMoveToWindow];
 
-  TSLOG(@"didMoveToWindow window=%d initialDetent=%ld didInitial=%d pendingNavRepresent=%d container=%d",
-        self.window != nil, (long)_initialDetentIndex, _didInitiallyPresent, _pendingNavigationRepresent,
-        _containerView != nil);
   if (!self.window)
     return;
 
@@ -195,8 +189,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)dealloc {
-  TSLOG(@"dealloc isPresented=%d beingDismissed=%d presenter=%@", _controller.isPresented, _controller.isBeingDismissed,
-        NSStringFromClass([_controller.presentingViewController class]));
   [_screensEventObserver stopObserving];
   _screensEventObserver = nil;
 
@@ -433,9 +425,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)prepareForRecycle {
-  TSLOG(@"recycle isPresented=%d beingDismissed=%d logicallyOpen=%d presenter=%@ presented=%@", _controller.isPresented,
-        _controller.isBeingDismissed, _logicallyOpen, NSStringFromClass([_controller.presentingViewController class]),
-        NSStringFromClass([_controller.presentedViewController class]));
   [super prepareForRecycle];
 
   // Fabric has already zeroed self.tag by now — unregister by the cached tag (see _registeredTag).
@@ -568,8 +557,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
     _pendingMountEvent = YES;
   }
 
-  TSLOG(@"mountChild container=%p isPresented=%d beingPresented=%d hasPendingContent=%d", _containerView,
-        _controller.isPresented, _controller.isBeingPresented, _hasPendingContentPresent);
   // Content is now attached — replay any present that was parked waiting for it.
   [self flushPendingContentPresent];
 }
@@ -581,8 +568,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   if (_containerView == nil || _containerView != childComponentView)
     return;
 
-  TSLOG(@"unmountChild isPresented=%d beingDismissed=%d logicallyOpen=%d hideReasons=%lu", _controller.isPresented,
-        _controller.isBeingDismissed, _logicallyOpen, (unsigned long)_hideReasons);
   if (_controller.isPresented) {
     UIView *superView = _containerView.superview;
     UIView *snapshot = [_containerView snapshotViewAfterScreenUpdates:NO];
@@ -601,13 +586,7 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 - (void)presentAtIndex:(NSInteger)index
               animated:(BOOL)animated
             completion:(nullable TrueSheetCompletionBlock)completion {
-  TSLOG(@"present idx=%ld container=%d isPresented=%d beingDismissed=%d beingPresented=%d logicallyOpen=%d "
-        @"suspended=%d hideReasons=%lu presenter=%@",
-        (long)index, _containerView != nil, _controller.isPresented, _controller.isBeingDismissed,
-        _controller.isBeingPresented, _logicallyOpen, _suspendedProp || _suspendedByModule,
-        (unsigned long)_hideReasons, NSStringFromClass([[self findPresentingViewController] class]));
   if (_suspendedProp || _suspendedByModule) {
-    TSLOG(@"present gate=SUSPENDED");
     if (!_controller.isPresented && !_logicallyOpen) {
       _resumeEmitsPresentEvents = YES;
     }
@@ -625,7 +604,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   // dismissal. The transition coordinator also covers a cancelled interactive dismissal,
   // where viewControllerDidDismiss never fires.
   if (_controller.isBeingDismissed) {
-    TSLOG(@"present gate=DISMISS-DEFER");
     [self storePendingPresentAtIndex:index animated:animated completion:completion];
 
     __weak __typeof(self) weakSelf = self;
@@ -649,7 +627,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   }
 
   if (_controller.isBeingPresented || _controller.isPresented) {
-    TSLOG(@"present gate=ALREADY-PRESENTED orphan=%d", _controller.orphanedAfterUnmount);
     if (_controller.orphanedAfterUnmount) {
       // This recycled view is being reused for a new sheet while its previous controller is
       // still a presented zombie. Tear the zombie down and queue this present to replay clean.
@@ -685,8 +662,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   // never call our completion, so defer and replay from the in-flight transition.
   UIViewController *occupyingController = presentingViewController.presentedViewController;
   if (occupyingController != nil) {
-    TSLOG(@"present gate=BUSY-DEFER occupying=%@ occDismissing=%d", NSStringFromClass([occupyingController class]),
-          occupyingController.isBeingDismissed);
     [self storePendingPresentAtIndex:index animated:animated completion:completion];
 
     __weak __typeof(self) weakSelf = self;
@@ -713,12 +688,10 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   // classic symptom when a navigation represent or an initial present races content mounting.
   // Park it and replay from mountChildComponentView so the sheet only ever appears with content.
   if (_containerView == nil) {
-    TSLOG(@"present gate=CONTENT-DEFER");
     [self storePendingContentPresentAtIndex:index animated:animated completion:completion];
     return;
   }
 
-  TSLOG(@"present gate=PRESENT contentHeight=%@", _controller.contentHeight);
   _dismissedByPresenterTeardown = NO;
   _controller.dismissedWithPresenter = NO;
   [_controller setupAnchorViewInView:presentingViewController.view];
@@ -795,9 +768,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)dismissAnimated:(BOOL)animated completion:(nullable TrueSheetCompletionBlock)completion {
-  TSLOG(@"dismiss animated=%d isPresented=%d beingPresented=%d beingDismissed=%d logicallyOpen=%d dismissedByNav=%d",
-        animated, _controller.isPresented, _controller.isBeingPresented, _controller.isBeingDismissed, _logicallyOpen,
-        _dismissedByNavigation);
   // A dismiss supersedes any parked present (e.g. present(); dismiss(); in one tick) so the
   // present settles deterministically instead of resurrecting the sheet on a later replay.
   [self cancelPendingPresentWithReason:@"dismissed"];
@@ -966,19 +936,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)viewControllerDidPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
-  TSLOG(@"didPresent idx=%ld container=%d logicallyOpen=%d suppress=%d", (long)index, _containerView != nil,
-        _logicallyOpen, _suppressPresentEvents);
-  {
-    UISheetPresentationController *tsSheet = _controller.sheetPresentationController;
-    NSMutableArray<NSString *> *tsSubviews = [NSMutableArray array];
-    for (UIView *sub in tsSheet.containerView.subviews) {
-      [tsSubviews addObject:[NSString stringWithFormat:@"%@(a=%.2f,h=%d)", NSStringFromClass([sub class]), sub.alpha,
-                                                       sub.isHidden]];
-    }
-    TSLOG(@"didPresent dim-check dimmed=%d dimmedIdx=%@ undimmedId=%@ containerSubviews=[%@]", _controller.dimmed,
-          _controller.dimmedDetentIndex, tsSheet.largestUndimmedDetentIdentifier,
-          [tsSubviews componentsJoinedByString:@" | "]);
-  }
   BOOL wasResume = _logicallyOpen;
   [_containerView setupKeyboardObserverWithViewController:_controller];
   if (!(_suppressPresentEvents && _presentEventGeneration == _generation)) {
@@ -1047,7 +1004,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   if (!_controller.dismissedWithPresenter) {
     return;
   }
-  TSLOG(@"presenterTeardown detected — keeping sheet logically open");
   _dismissedByPresenterTeardown = YES;
   _logicallyOpen = YES;
   _resumeEmitsPresentEvents = NO;
@@ -1056,8 +1012,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 
 - (void)viewControllerWillDismiss {
   [self markPresenterTeardownIfNeeded];
-  TSLOG(@"willDismiss dismissedByNav=%d suspension=%d presenterTeardown=%d", _dismissedByNavigation,
-        _dismissingForSuspension, _dismissedByPresenterTeardown);
   if (!_dismissedByNavigation && !_dismissingForSuspension && !_dismissedByPresenterTeardown) {
     [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
   }
@@ -1065,9 +1019,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 
 - (void)viewControllerDidDismiss {
   [self markPresenterTeardownIfNeeded];
-  TSLOG(@"didDismiss dismissedByNav=%d suspension=%d presenterTeardown=%d logicallyOpen=%d hasPending=%d",
-        _dismissedByNavigation, _dismissingForSuspension, _dismissedByPresenterTeardown, _logicallyOpen,
-        _hasPendingPresent);
   [_containerView cleanupKeyboardObserver];
 
   if (_dismissedByPresenterTeardown) {
@@ -1162,8 +1113,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 #pragma mark - RNScreensEventObserverDelegate
 
 - (void)presenterScreenWillDisappear {
-  TSLOG(@"screenWillDisappear isPresented=%d beingDismissed=%d logicallyOpen=%d", _controller.isPresented,
-        _controller.isBeingDismissed, _logicallyOpen);
   if (_controller.isPresented && !_controller.isBeingDismissed) {
     _hideReasons |= TrueSheetHideReasonNavigation;
     _dismissedByNavigation = YES;
@@ -1176,8 +1125,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)presenterScreenWillAppear {
-  TSLOG(@"screenWillAppear logicallyOpen=%d hideReasons=%lu window=%d container=%d", _logicallyOpen,
-        (unsigned long)_hideReasons, self.window != nil, _containerView != nil);
   _hideReasons &= ~TrueSheetHideReasonNavigation;
   _dismissedByNavigation = NO;
 
@@ -1361,9 +1308,7 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 - (NSError *)pendingPresentCancelledError:(NSString *)reason {
   NSString *message =
     reason.length > 0 ? [NSString stringWithFormat:@"Presentation cancelled: %@", reason] : @"Presentation cancelled";
-  return [NSError errorWithDomain:@"com.lodev09.TrueSheet"
-                             code:1003
-                         userInfo:@{NSLocalizedDescriptionKey : message}];
+  return [NSError errorWithDomain:@"com.lodev09.TrueSheet" code:1003 userInfo:@{NSLocalizedDescriptionKey : message}];
 }
 
 - (NSError *)pendingPresentTimeoutError {
@@ -1403,8 +1348,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
     return NO;
   }
 
-  TSLOG(@"suspendFromModule isPresented=%d beingPresented=%d hasPending=%d logicallyOpen=%d", _controller.isPresented,
-        _controller.isBeingPresented, _hasPendingPresent, _logicallyOpen);
   _suspendedByModule = YES;
   [self reconcileSuspension];
   return YES;
@@ -1414,7 +1357,6 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   if (!_suspendedByModule) {
     return;
   }
-  TSLOG(@"resumeFromModule logicallyOpen=%d window=%d", _logicallyOpen, self.window != nil);
   _suspendedByModule = NO;
   [self reconcileSuspension];
 }
@@ -1469,14 +1411,10 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 }
 
 - (void)flushRepresentIfNeeded {
-  TSLOG(@"flushRepresent logicallyOpen=%d hideReasons=%lu isPresented=%d beingPresented=%d window=%d container=%d",
-        _logicallyOpen, (unsigned long)_hideReasons, _controller.isPresented, _controller.isBeingPresented,
-        self.window != nil, _containerView != nil);
   if (!(_logicallyOpen && _hideReasons == 0 && !_controller.isPresented && !_controller.isBeingPresented &&
         self.window != nil)) {
     return;
   }
-  TSLOG(@"flushRepresent -> REPRESENTING");
 
   NSInteger index = _controller.activeDetentIndex;
   if (index < 0 && _initialDetentIndex >= 0) {
