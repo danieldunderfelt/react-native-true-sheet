@@ -27,7 +27,7 @@ baseConfig.resolver.resolveRequest = (context, moduleName, platform) => {
     return context.resolveRequest(context, 'expo-router/react-navigation', platform);
   }
 
-  // Handle subpath exports for the main package (e.g., @lodev09/react-native-true-sheet/reanimated)
+  // Handle subpath exports for the main package (e.g., @danieldunderfelt/react-native-true-sheet/reanimated)
   if (moduleName.startsWith(pkg.name + '/')) {
     context = {
       ...context,

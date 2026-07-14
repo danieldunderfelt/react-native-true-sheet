@@ -20,7 +20,7 @@ const baseConfig = withMetroConfig(getDefaultConfig(__dirname), {
 const originalResolveRequest = baseConfig.resolver.resolveRequest
 
 baseConfig.resolver.resolveRequest = (context, moduleName, platform) => {
-  // Handle subpath exports for the main package (e.g., @lodev09/react-native-true-sheet/reanimated)
+  // Handle subpath exports for the main package (e.g., @danieldunderfelt/react-native-true-sheet/reanimated)
   if (moduleName.startsWith(pkg.name + '/')) {
     context = {
       ...context,

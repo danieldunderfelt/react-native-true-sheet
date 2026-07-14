@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { TrueSheet, TrueSheetProvider } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
 
 import {
   BasicSheet,

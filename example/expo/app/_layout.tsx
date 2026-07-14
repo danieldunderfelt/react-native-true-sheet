@@ -3,7 +3,7 @@ import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { useColorScheme } from 'react-native';
-import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
+import { TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
 import { MapProvider } from '@lugg/maps';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? '';
 import { DARK_BLUE } from '@example/shared/utils';

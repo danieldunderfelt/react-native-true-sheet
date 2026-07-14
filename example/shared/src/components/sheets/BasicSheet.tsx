@@ -5,7 +5,7 @@ import {
   TrueSheetPeek,
   useTrueSheet,
   type TrueSheetProps,
-} from '@lodev09/react-native-true-sheet';
+} from '@danieldunderfelt/react-native-true-sheet';
 
 import { BLUE, DARK, DARK_BLUE, FOOTER_HEIGHT, GAP, SPACING, times } from '../../utils';
 import { DemoContent } from '../DemoContent';

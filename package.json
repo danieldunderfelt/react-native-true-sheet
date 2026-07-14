@@ -70,12 +70,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lodev09/react-native-true-sheet.git"
+    "url": "git+https://github.com/danieldunderfelt/react-native-true-sheet.git"
   },
-  "author": "Jovanni Lo <lodev09@gmail.com> (https://github.com/lodev09)",
+  "author": "Daniel Dunderfelt <daniel@developsuperpowers.com> (https://github.com/danieldunderfelt)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/lodev09/react-native-true-sheet/issues"
+    "url": "https://github.com/danieldunderfelt/react-native-true-sheet/issues"
   },
   "homepage": "https://sheet.lodev09.com",
   "publishConfig": {

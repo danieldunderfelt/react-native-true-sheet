@@ -21,7 +21,7 @@ interface ReanimatedTrueSheetProps extends TrueSheetProps {
  *
  * @example
  * ```tsx
- * import { ReanimatedTrueSheet, ReanimatedTrueSheetProvider } from '@lodev09/react-native-true-sheet/reanimated'
+ * import { ReanimatedTrueSheet, ReanimatedTrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet/reanimated'
  *
  * function MyScreen() {
  *   const sheetRef = useRef<TrueSheet>(null)

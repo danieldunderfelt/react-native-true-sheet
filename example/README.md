@@ -1,6 +1,6 @@
 # TrueSheet Examples
 
-This directory contains example apps demonstrating `@lodev09/react-native-true-sheet`.
+This directory contains example apps demonstrating `@danieldunderfelt/react-native-true-sheet`.
 
 ## Structure
 

@@ -9,7 +9,7 @@ interface TrueSheetState {
 
 /**
  * Mock TrueSheet component for testing.
- * Import from '@lodev09/react-native-true-sheet/mock' in your test setup.
+ * Import from '@danieldunderfelt/react-native-true-sheet/mock' in your test setup.
  */
 export class TrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
   static instances: Record<string, TrueSheet> = {};

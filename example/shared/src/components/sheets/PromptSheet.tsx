@@ -1,7 +1,7 @@
 import { forwardRef, useRef, type Ref, useImperativeHandle } from 'react';
 import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { TrueSheet, type TrueSheetProps } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, type TrueSheetProps } from '@danieldunderfelt/react-native-true-sheet';
 
 import { DARK, BUTTON_HEIGHT as FOOTER_HEIGHT, GAP, SPACING } from '../../utils';
 import { Input } from '../Input';
