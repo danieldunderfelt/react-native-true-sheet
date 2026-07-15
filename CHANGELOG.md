@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 3.12.1
+
+## 3.12.0
+
 <!-- Replace #XXX with the PR number and @author with the contributor handle before release. -->
 
 ### 🎉 New features

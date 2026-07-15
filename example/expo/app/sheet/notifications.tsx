@@ -1,4 +1,4 @@
-import { useTrueSheetNavigation } from '@lodev09/react-native-true-sheet/navigation';
+import { useTrueSheetNavigation } from '@danieldunderfelt/react-native-true-sheet/navigation';
 
 import { NotificationsSheetContent } from '@example/shared/screens';
 

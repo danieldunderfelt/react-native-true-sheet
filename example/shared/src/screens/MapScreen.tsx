@@ -17,11 +17,11 @@ import {
   type DragBeginEvent,
   type DragEndEvent,
   type WillPresentEvent,
-} from '@lodev09/react-native-true-sheet';
+} from '@danieldunderfelt/react-native-true-sheet';
 import {
   ReanimatedTrueSheet,
   useReanimatedTrueSheet,
-} from '@lodev09/react-native-true-sheet/reanimated';
+} from '@danieldunderfelt/react-native-true-sheet/reanimated';
 import Animated, {
   FadeInLeft,
   LinearTransition,
@@ -31,8 +31,8 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
-import { ReanimatedTrueSheetProvider } from '@lodev09/react-native-true-sheet/reanimated';
+import { TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
+import { ReanimatedTrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet/reanimated';
 
 import { Button, ButtonGroup, DemoContent, Header, Spacer } from '../components';
 import { BLUE, DARK, GAP, GRAY, HEADER_HEIGHT, SPACING } from '../utils';

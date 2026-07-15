@@ -4,10 +4,10 @@ import {
   type TrueSheetNavigationEventMap,
   type TrueSheetNavigationOptions,
   type TrueSheetNavigationState,
-} from '@lodev09/react-native-true-sheet/navigation';
+} from '@danieldunderfelt/react-native-true-sheet/navigation';
 
 import { DARK } from '@example/shared/utils';
-import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
+import { TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
 
 type ParamListBase = Record<string, object | undefined>;
 

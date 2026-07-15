@@ -1,6 +1,6 @@
 import { forwardRef, useRef, type Ref, useImperativeHandle } from 'react';
 import { Platform, StyleSheet, Text, useWindowDimensions } from 'react-native';
-import { TrueSheet, type TrueSheetProps } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, type TrueSheetProps } from '@danieldunderfelt/react-native-true-sheet';
 import Animated, { useAnimatedStyle, useSharedValue, withDecay } from 'react-native-reanimated';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';

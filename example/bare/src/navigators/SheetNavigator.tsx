@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { TrueSheet } from '@lodev09/react-native-true-sheet';
+import { TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import {
   createTrueSheetNavigator,
   useTrueSheetNavigation,
-} from '@lodev09/react-native-true-sheet/navigation';
+} from '@danieldunderfelt/react-native-true-sheet/navigation';
 import { Button, DemoContent, Footer } from '@example/shared/components';
 import {
   BLUE,

@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { TrueSheetProvider, type TrueSheet } from '@lodev09/react-native-true-sheet';
+import { TrueSheetProvider, type TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
 
 import { BLUE, GAP, SPACING } from '../utils';
 import { Button, Spacer } from '../components';

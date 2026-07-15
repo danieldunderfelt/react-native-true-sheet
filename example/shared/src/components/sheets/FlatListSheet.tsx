@@ -1,6 +1,6 @@
 import { forwardRef, useRef } from 'react';
 import { StyleSheet, FlatList, View, Platform } from 'react-native';
-import { TrueSheet, type TrueSheetProps } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, type TrueSheetProps } from '@danieldunderfelt/react-native-true-sheet';
 
 import { DARK, DARK_GRAY, FOOTER_HEIGHT, HEADER_HEIGHT, SPACING, times } from '../../utils';
 import { DemoContent } from '../DemoContent';

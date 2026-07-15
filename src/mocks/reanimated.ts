@@ -26,7 +26,7 @@ const createMockSharedValue = <T>(initialValue: T): SharedValue<T> =>
 
 /**
  * Mock ReanimatedTrueSheet component for testing.
- * Import from '@lodev09/react-native-true-sheet/reanimated/mock' in your test setup.
+ * Import from '@danieldunderfelt/react-native-true-sheet/reanimated/mock' in your test setup.
  */
 export class ReanimatedTrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
   static instances: Record<string, ReanimatedTrueSheet> = {};

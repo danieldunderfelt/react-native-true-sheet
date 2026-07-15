@@ -46,7 +46,7 @@ const AnimatedTrueSheet = Animated.createAnimatedComponent(TrueSheet);
  *
  * @example
  * ```tsx
- * import { ReanimatedTrueSheet, ReanimatedTrueSheetProvider } from '@lodev09/react-native-true-sheet'
+ * import { ReanimatedTrueSheet, ReanimatedTrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet'
  *
  * function MyScreen() {
  *   const sheetRef = useRef<TrueSheet>(null)

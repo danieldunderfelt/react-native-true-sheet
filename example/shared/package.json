@@ -13,7 +13,7 @@
     "./utils": "./src/utils/index.ts"
   },
   "peerDependencies": {
-    "@lodev09/react-native-true-sheet": "*",
+    "@danieldunderfelt/react-native-true-sheet": "*",
     "@lugg/maps": "*",
     "react": "*",
     "react-native": "*",
