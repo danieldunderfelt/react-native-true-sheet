@@ -301,6 +301,17 @@ export interface TrueSheetProps extends ViewProps {
   initialDetentAnimated?: boolean;
 
   /**
+   * While `true`, the sheet steps aside natively — dismissed on iOS, hidden on Android —
+   * without reporting a close to the consumer. It stays logically presented, keeps its
+   * mounted content and remembered detent, and returns at that detent when set back to
+   * `false`. Use it to let a full-screen native modal present over an open sheet (the two
+   * share a presenter on iOS), then bring the sheet back when the modal is gone.
+   *
+   * @default false
+   */
+  suspended?: boolean;
+
+  /**
    * The detent index that the sheet should start to dim the background.
    * This is ignored if `dimmed` is set to `false`.
    *
@@ -668,4 +679,15 @@ export interface TrueSheetStaticMethods {
    * Dismiss every presented sheet, from the top of the stack downward.
    */
   dismissAll(animated?: boolean): Promise<void>;
+
+  /**
+   * Suspend every currently open sheet: each steps aside natively while staying
+   * logically presented. Sheets presented after this call are unaffected.
+   */
+  suspendAll(): Promise<void>;
+
+  /**
+   * Re-present the sheets captured by `suspendAll` at their remembered detents.
+   */
+  unsuspendAll(): Promise<void>;
 }

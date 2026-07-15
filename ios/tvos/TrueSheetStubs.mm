@@ -147,6 +147,14 @@ RCT_EXPORT_MODULE(TrueSheetModule)
   resolve(nil);
 }
 
+- (void)suspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve(nil);
+}
+
+- (void)unsuspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve(nil);
+}
+
 @end
 
 #endif  // TARGET_OS_TV && RCT_NEW_ARCH_ENABLED

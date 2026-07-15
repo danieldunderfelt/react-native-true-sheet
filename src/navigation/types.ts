@@ -81,6 +81,11 @@ export type TrueSheetNavigationState<ParamList extends ParamListBase> = Omit<
     resizeIndex?: number;
     resizeKey?: number;
     closing?: boolean;
+    pendingReplace?: {
+      key: string;
+      name: string;
+      params?: object;
+    };
   })[];
 };
 

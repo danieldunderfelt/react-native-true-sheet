@@ -27,8 +27,17 @@ object TrueSheetStackManager {
    */
   private fun findTopmostSheet(): TrueSheetView? =
     presentedSheetStack.lastOrNull {
-      it.viewController.isPresented && it.viewController.isSheetVisible
+      it.viewController.isPresented && it.viewController.isSheetVisible && !it.viewController.isBeingDismissed
     }
+
+  private fun reparentChildren(sheetView: TrueSheetView) {
+    val parentSheetView = sheetView.viewController.parentSheetView
+    presentedSheetStack.forEach {
+      if (it != sheetView && it.viewController.parentSheetView == sheetView) {
+        it.viewController.parentSheetView = parentSheetView
+      }
+    }
+  }
 
   /**
    * Registers a sheet in the stack and returns its parent sheet if any.
@@ -53,6 +62,7 @@ object TrueSheetStackManager {
   @JvmStatic
   fun unregisterSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -96,9 +106,18 @@ object TrueSheetStackManager {
     }
   }
 
+  /** Returns a snapshot of presented sheets ordered from bottom-most to top-most. */
+  @JvmStatic
+  fun getPresentedSheetsInStackOrder(): List<TrueSheetView> {
+    synchronized(presentedSheetStack) {
+      return presentedSheetStack.toList()
+    }
+  }
+
   @JvmStatic
   fun removeSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -129,7 +148,12 @@ object TrueSheetStackManager {
   fun isTopmostSheet(sheetView: TrueSheetView): Boolean {
     synchronized(presentedSheetStack) {
       val rootContainer = sheetView.rootContainerView
-      return presentedSheetStack.lastOrNull { it.rootContainerView == rootContainer } == sheetView
+      return presentedSheetStack.lastOrNull {
+        it.rootContainerView == rootContainer &&
+          it.viewController.isPresented &&
+          it.viewController.isSheetVisible &&
+          !it.viewController.isBeingDismissed
+      } == sheetView
     }
   }
 
@@ -151,7 +175,9 @@ object TrueSheetStackManager {
   @JvmStatic
   fun getRootSheet(): TrueSheetView? {
     synchronized(presentedSheetStack) {
-      val topmost = presentedSheetStack.lastOrNull { it.viewController.isPresented } ?: return null
+      val topmost = presentedSheetStack.lastOrNull {
+        it.viewController.isPresented && it.viewController.isSheetVisible
+      } ?: return null
 
       var current: TrueSheetView = topmost
       while (true) {

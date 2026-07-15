@@ -35,6 +35,8 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   TrueSheetContainerViewDelegate,
   RNScreensEventObserverDelegate {
 
+  private data class PendingContentPresent(val detentIndex: Int, val animated: Boolean, val promiseCallback: () -> Unit)
+
   // ==================== Properties ====================
 
   internal val viewController: TrueSheetViewController = TrueSheetViewController(reactContext)
@@ -44,6 +46,20 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   var initialDetentIndex: Int = -1
   var initialDetentAnimated: Boolean = true
   private var didInitiallyPresent: Boolean = false
+  var suspendedProp: Boolean = false
+  private var suspendedByModule: Boolean = false
+  private var logicallyOpenWhileSuspended: Boolean = false
+  private var resumeDetentIndex: Int = -1
+  private var lastAppliedSuspended: Boolean = false
+  private var applySuspendedAfterPresent: Boolean = false
+
+  // The sheet is suspended while either source holds it: the `suspended` prop or an
+  // imperative TrueSheet.suspendAll() capture.
+  private val isSuspensionRequested: Boolean
+    get() = suspendedProp || suspendedByModule
+
+  internal val isLogicallyOpenWhileSuspended: Boolean
+    get() = logicallyOpenWhileSuspended
 
   private var lastContainerWidth: Int = 0
   private var lastContainerHeight: Int = 0
@@ -61,6 +77,14 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   // Debounce flag to coalesce rapid layout changes into a single sheet update
   private var isSheetUpdatePending: Boolean = false
+
+  // A present() issued while a dismiss is in flight is parked here: `pendingPresentReplay`
+  // re-invokes present() once teardown completes; `pendingPresentResolve` is that present's
+  // JS promise callback, invoked directly if the parked present is superseded before it replays.
+  // Touched only on the UI thread (see @UiThread on present/dismiss and TrueSheetModule's main-looper posts).
+  private var pendingPresentReplay: (() -> Unit)? = null
+  private var pendingPresentResolve: (() -> Unit)? = null
+  private var pendingContentPresent: PendingContentPresent? = null
 
   // Root container for the coordinator layout (activity or Modal dialog content view)
   internal var rootContainerView: ViewGroup? = null
@@ -102,6 +126,12 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
     super.onAttachedToWindow()
 
     if (initialDetentIndex >= 0 && !didInitiallyPresent) {
+      if (isSuspensionRequested) {
+        logicallyOpenWhileSuspended = true
+        resumeDetentIndex = initialDetentIndex
+        return
+      }
+
       didInitiallyPresent = true
       if (initialDetentAnimated) {
         present(initialDetentIndex, true) { }
@@ -122,6 +152,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
       child.delegate = this
       val surfaceId = UIManagerHelper.getSurfaceId(this)
       eventDispatcher?.dispatchEvent(MountEvent(surfaceId, id))
+      flushPendingContentPresent()
     }
   }
 
@@ -163,6 +194,12 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   }
 
   fun onDropInstance() {
+    cancelPendingOps()
+    cancelPendingContentPresent()
+    logicallyOpenWhileSuspended = false
+    suspendedByModule = false
+    resumeDetentIndex = -1
+    applySuspendedAfterPresent = false
     reactContext.removeLifecycleEventListener(this)
 
     TrueSheetModule.unregisterView(id)
@@ -184,6 +221,8 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
    */
   fun finalizeUpdates() {
     setupScrollable()
+
+    reconcileSuspension()
 
     if (viewController.isPresented) {
       viewController.sheetView?.setupBackground()
@@ -302,20 +341,21 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   // ==================== Screen Event Observer ====================
 
   private fun setupScreenEventObserver() {
-    screensEventObserver = RNScreensEventObserver().apply {
-      delegate = this@TrueSheetView
-
-      // For stacked sheets on the same screen, inherit parent's presenter screen tag.
-      // If parent was hidden by screen navigation, this sheet is on a different screen.
-      val parentScreenTag = viewController.parentSheetView?.screensEventObserver?.presenterScreenTag ?: 0
-      val parentHiddenByScreen = viewController.parentSheetView?.viewController?.wasHiddenByScreen == true
-      if (parentScreenTag != 0 && !parentHiddenByScreen) {
-        presenterScreenTag = parentScreenTag
-      } else {
-        capturePresenterScreenFromView(this@TrueSheetView)
-      }
-      startObserving(eventDispatcher)
+    val observer = screensEventObserver ?: RNScreensEventObserver().also {
+      screensEventObserver = it
     }
+    observer.delegate = this
+
+    // For stacked sheets on the same screen, inherit parent's presenter screen tag.
+    // If parent was hidden by screen navigation, this sheet is on a different screen.
+    val parentScreenTag = viewController.parentSheetView?.screensEventObserver?.presenterScreenTag ?: 0
+    val parentHiddenByScreen = viewController.parentSheetView?.viewController?.wasHiddenByScreen == true
+    if (parentScreenTag != 0 && !parentHiddenByScreen) {
+      observer.presenterScreenTag = parentScreenTag
+    } else {
+      observer.capturePresenterScreenFromView(this)
+    }
+    observer.startObserving(eventDispatcher)
   }
 
   private fun cleanupScreenEventObserver() {
@@ -344,16 +384,62 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   // ==================== Sheet Actions ====================
 
+  private fun cancelPendingOps() {
+    if (pendingPresentReplay != null) {
+      pendingPresentResolve?.invoke()
+      pendingPresentReplay = null
+      pendingPresentResolve = null
+    }
+  }
+
+  private fun storePendingContentPresent(detentIndex: Int, animated: Boolean, promiseCallback: () -> Unit) {
+    cancelPendingContentPresent()
+    pendingContentPresent = PendingContentPresent(detentIndex, animated, promiseCallback)
+  }
+
+  private fun flushPendingContentPresent() {
+    val pending = pendingContentPresent ?: return
+    pendingContentPresent = null
+    present(pending.detentIndex, pending.animated, pending.promiseCallback)
+  }
+
+  private fun cancelPendingContentPresent() {
+    val pending = pendingContentPresent ?: return
+    pendingContentPresent = null
+    pending.promiseCallback()
+  }
+
   @UiThread
   fun present(detentIndex: Int, animated: Boolean = true, promiseCallback: () -> Unit) {
+    cancelPendingContentPresent()
+
+    if (isSuspensionRequested) {
+      if (!viewController.isPresented) {
+        logicallyOpenWhileSuspended = true
+      }
+      resumeDetentIndex = detentIndex
+      promiseCallback()
+      return
+    }
+
+    if (viewController.isBeingDismissed) {
+      cancelPendingOps()
+      resumeDetentIndex = detentIndex
+      pendingPresentReplay = { present(detentIndex, animated, promiseCallback) }
+      pendingPresentResolve = promiseCallback
+      return
+    }
+
     if (viewController.isPresented) {
       RNLog.w(reactContext, "TrueSheet: sheet is already presented. Use resize() to change detent.")
       promiseCallback()
       return
     }
 
-    viewController.createSheet()
-    setupScrollable()
+    if (viewController.containerView == null) {
+      storePendingContentPresent(detentIndex, animated, promiseCallback)
+      return
+    }
 
     // Dismiss keyboard if focused view is within a sheet or if target detent will be dimmed
     val parentSheet = TrueSheetStackManager.getTopmostSheet()
@@ -367,15 +453,152 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
       return
     }
 
-    // Attach coordinator to the root container
-    rootContainerView = findRootContainerView()
-    viewController.coordinatorLayout?.let { rootContainerView?.addView(it) }
+    val rootContainer = findRootContainerView()
+    if (rootContainer == null || !rootContainer.isAttachedToWindow) {
+      RNLog.w(reactContext, "TrueSheet: Cannot present because the root container is missing or detached.")
+      promiseCallback()
+      return
+    }
+
+    viewController.createSheet()
+    setupScrollable()
+
+    rootContainerView = rootContainer
+    viewController.coordinatorLayout?.let { rootContainer.addView(it) }
 
     // Register with observer to track sheet stack hierarchy
     viewController.parentSheetView = TrueSheetStackManager.registerSheet(this)
+    setupScreenEventObserver()
 
     viewController.presentPromise = promiseCallback
     viewController.present(detentIndex, animated)
+  }
+
+  @UiThread
+  private fun reconcileSuspension() {
+    val suspended = isSuspensionRequested
+    if (lastAppliedSuspended == suspended) return
+    lastAppliedSuspended = suspended
+    applySuspended(suspended)
+  }
+
+  /** Marks an eligible sheet as captured by TrueSheet.suspendAll without reconciling it. */
+  @UiThread
+  internal fun markSuspendedFromModule(): Boolean {
+    if (suspendedByModule) return true
+
+    val hasPendingPresent = pendingPresentReplay != null || pendingContentPresent != null
+    val open = logicallyOpenWhileSuspended ||
+      hasPendingPresent ||
+      (
+        !viewController.isBeingDismissed &&
+          (viewController.isPresented || viewController.isPresentInFlight)
+        )
+    if (!open) return false
+
+    suspendedByModule = true
+    return true
+  }
+
+  /**
+   * Imperative suspension (TrueSheet.suspendAll). Captures this sheet only if it is open in
+   * some form — presented, mid-presentation, parked behind a dismissal or content mount, or
+   * logically open — so sheets presented after the call are unaffected.
+   */
+  @UiThread
+  internal fun suspendFromModule(): Boolean {
+    if (!markSuspendedFromModule()) return false
+    reconcileSuspension()
+    return true
+  }
+
+  internal val isSuspendedByModule: Boolean
+    get() = suspendedByModule
+
+  /** Releases a TrueSheet.suspendAll capture and re-presents if no other source holds it. */
+  @UiThread
+  internal fun resumeFromModule() {
+    if (!suspendedByModule) return
+    suspendedByModule = false
+    reconcileSuspension()
+  }
+
+  @UiThread
+  private fun applySuspended(suspend: Boolean) {
+    if (suspend) applySuspend() else applyResume()
+  }
+
+  @UiThread
+  private fun applySuspend() {
+    if (pendingPresentReplay != null) {
+      cancelPendingOps()
+      if (!viewController.isPresented || viewController.isBeingDismissed) {
+        logicallyOpenWhileSuspended = true
+      }
+    }
+
+    if (viewController.isPresentInFlight) {
+      applySuspendedAfterPresent = true
+      return
+    }
+
+    applySuspendedAfterPresent = false
+
+    if (viewController.isBeingDismissed || !viewController.isPresented || viewController.isSuspended) return
+
+    val sheetsAbove = TrueSheetStackManager.getSheetsAbove(this)
+    for (sheet in sheetsAbove) {
+      if (!sheet.suspendedByModule) {
+        sheet.viewController.dismiss(animated = false)
+      }
+    }
+
+    val wasVisible = viewController.isSheetVisible
+    viewController.suspend()
+    resumeDetentIndex = viewController.currentDetentIndex
+    if (wasVisible) {
+      TrueSheetStackManager.getParentSheet(this)?.let { parent ->
+        parent.resetTranslation {
+          if (parent.viewController.isSheetVisible) {
+            parent.viewControllerDidFocus()
+          }
+        }
+      }
+    }
+  }
+
+  @UiThread
+  private fun applyResume() {
+    if (viewController.isPresentInFlight) {
+      applySuspendedAfterPresent = true
+      return
+    }
+
+    applySuspendedAfterPresent = false
+
+    if (viewController.isBeingDismissed) return
+
+    if (viewController.isPresented) {
+      if (!viewController.isSuspended) return
+
+      viewController.resumeFromSuspend(resumeDetentIndex)
+      if (viewController.isSheetVisible) {
+        TrueSheetStackManager.updateParentTranslation(this)
+        TrueSheetStackManager.getParentSheet(this)?.viewControllerDidBlur()
+      }
+    } else if (logicallyOpenWhileSuspended) {
+      logicallyOpenWhileSuspended = false
+      didInitiallyPresent = true
+      val index = if (resumeDetentIndex >= 0) resumeDetentIndex else initialDetentIndex
+      present(index, true) { }
+    }
+  }
+
+  @UiThread
+  internal fun applyDeferredSuspensionAfterPresent() {
+    if (!applySuspendedAfterPresent) return
+    applySuspendedAfterPresent = false
+    applySuspended(isSuspensionRequested)
   }
 
   @UiThread
@@ -385,6 +608,21 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   @UiThread
   fun dismiss(animated: Boolean = true, promiseCallback: () -> Unit) {
+    cancelPendingOps()
+    cancelPendingContentPresent()
+
+    if (!viewController.isPresented && logicallyOpenWhileSuspended) {
+      logicallyOpenWhileSuspended = false
+      resumeDetentIndex = -1
+      didInitiallyPresent = true
+
+      val surfaceId = UIManagerHelper.getSurfaceId(this)
+      eventDispatcher?.dispatchEvent(WillDismissEvent(surfaceId, id))
+      eventDispatcher?.dispatchEvent(DidDismissEvent(surfaceId, id))
+      promiseCallback()
+      return
+    }
+
     if (viewController.isBeingDismissed || !viewController.isPresented) {
       RNLog.w(reactContext, "TrueSheet: sheet is already dismissed. No need to dismiss it again.")
       promiseCallback()
@@ -420,6 +658,12 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   @UiThread
   fun resize(detentIndex: Int, promiseCallback: () -> Unit) {
+    if (isSuspensionRequested) {
+      resumeDetentIndex = detentIndex
+      promiseCallback()
+      return
+    }
+
     if (!viewController.isPresented) {
       RNLog.w(reactContext, "TrueSheet: Cannot resize. Sheet is not presented.")
       promiseCallback()
@@ -455,7 +699,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
    * Propagates additional translation to parent so the entire stack stays visually consistent.
    */
   fun updateTranslationForChild(childSheetTop: Int) {
-    if (!viewController.isSheetVisible || viewController.isExpanded) return
+    if (!viewController.isSheetVisible || viewController.isExpanded || viewController.isBeingDismissed) return
 
     viewController.sheetView?.behavior?.isDraggable = false
 
@@ -505,8 +749,6 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   }
 
   override fun viewControllerDidPresent(index: Int, position: Float, detent: Float) {
-    setupScreenEventObserver()
-
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     eventDispatcher?.dispatchEvent(DidPresentEvent(surfaceId, id, index, position, detent))
   }
@@ -528,15 +770,41 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
     TrueSheetStackManager.unregisterSheet(this)
 
+    if (!logicallyOpenWhileSuspended) {
+      resumeDetentIndex = -1
+    }
+
+    val pendingReplay = pendingPresentReplay
+    if (pendingReplay != null) {
+      pendingPresentReplay = null
+      pendingPresentResolve = null
+      post { pendingReplay() }
+    } else if (logicallyOpenWhileSuspended && !isSuspensionRequested) {
+      val index = if (resumeDetentIndex >= 0) resumeDetentIndex else initialDetentIndex
+      post {
+        if (pendingPresentReplay != null ||
+          !logicallyOpenWhileSuspended ||
+          isSuspensionRequested
+        ) {
+          return@post
+        }
+        logicallyOpenWhileSuspended = false
+        didInitiallyPresent = true
+        present(index, true) { }
+      }
+    }
+
     parent?.resetTranslation {
       val parentController = parent.viewController
-      if (parentController.isPresented && !parentController.isBeingDismissed) {
+      if (parentController.isPresented && parentController.isSheetVisible && !parentController.isBeingDismissed) {
         parent.viewControllerDidFocus()
       }
     }
   }
 
   override fun viewControllerDidChangeDetent(index: Int, position: Float, detent: Float) {
+    if (!viewController.isSheetVisible) return
+
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     eventDispatcher?.dispatchEvent(DetentChangeEvent(surfaceId, id, index, position, detent))
   }
@@ -557,6 +825,8 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   }
 
   override fun viewControllerDidChangePosition(index: Float, position: Float, detent: Float, realtime: Boolean) {
+    if (!viewController.isSheetVisible) return
+
     val surfaceId = UIManagerHelper.getSurfaceId(this)
     eventDispatcher?.dispatchEvent(PositionChangeEvent(surfaceId, id, index, position, detent, realtime))
   }
@@ -628,7 +898,7 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
   // ==================== RNScreensEventObserverDelegate ====================
 
   override fun presenterScreenWillDisappear() {
-    if (viewController.isPresented && viewController.isSheetVisible) {
+    if (viewController.isPresented && !viewController.wasHiddenByScreen) {
       KeyboardUtils.dismiss(this) {}
       viewController.post { viewController.hideForScreen() }
     }
@@ -636,7 +906,6 @@ class TrueSheetView(private val reactContext: ThemedReactContext) :
 
   override fun presenterScreenWillAppear() {
     if (viewController.isPresented && viewController.wasHiddenByScreen) {
-      viewController.wasHiddenByScreen = false
       viewController.showAfterScreen()
     }
   }

@@ -1,6 +1,8 @@
+import { createRef } from 'react';
 import { Text } from 'react-native';
 import { render, act } from '@testing-library/react-native';
 import { TrueSheet, TrueSheetPeek } from '../index';
+import NativeTrueSheetModule from '../specs/NativeTrueSheetModule';
 import type {
   DidDismissEvent,
   WillFocusEvent,
@@ -33,6 +35,14 @@ describe('TrueSheet', () => {
   it('should have dismissAll static method', () => {
     expect(TrueSheet.dismissAll).toBeDefined();
     expect(typeof TrueSheet.dismissAll).toBe('function');
+  });
+
+  it('suspendAll/unsuspendAll delegate to the native module', async () => {
+    await TrueSheet.suspendAll();
+    expect((NativeTrueSheetModule as any).suspendAll).toHaveBeenCalled();
+
+    await TrueSheet.unsuspendAll();
+    expect((NativeTrueSheetModule as any).unsuspendAll).toHaveBeenCalled();
   });
 
   it('should render TrueSheet component without crashing', () => {
@@ -288,6 +298,218 @@ describe('TrueSheet', () => {
       });
 
       expect(onDidBlurMock).toHaveBeenCalled();
+    });
+  });
+
+  describe('Re-entrancy and promise safety', () => {
+    it('keeps the native view mounted when present() is called from onDidDismiss', async () => {
+      // findNodeHandle has no native tree to resolve against in jest — give present()
+      // a live handle so it reaches the (mocked) native call like it would in an app.
+      const handleSpy = jest.spyOn(TrueSheet.prototype as any, 'handle', 'get').mockReturnValue(1);
+
+      const { getByText, queryByText } = render(
+        <TrueSheet
+          name="reentrant-dismiss"
+          initialDetentIndex={0}
+          onDidDismiss={() => {
+            (TrueSheet as any).instances['reentrant-dismiss']?.present().catch(() => {});
+          }}
+        >
+          <Text>Reentrant Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByText('Reentrant Content')).toBeDefined();
+
+      const sheetRef = (TrueSheet as any).instances['reentrant-dismiss'];
+      await act(async () => {
+        sheetRef.onDidDismiss({} as DidDismissEvent);
+      });
+
+      // present() inside the callback sets isPresenting before the unmount decision,
+      // so the container must stay mounted.
+      expect(queryByText('Reentrant Content')).not.toBeNull();
+
+      handleSpy.mockRestore();
+    });
+
+    it('settles a pending present() quietly when the sheet unmounts before it mounts', async () => {
+      const ref = createRef<any>();
+      const { unmount } = render(
+        <TrueSheet ref={ref} name="unmount-pending">
+          <Text>Pending Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      const presentCallsBefore = (NativeTrueSheetModule as any).presentByRef.mock.calls.length;
+      let settled = false;
+      let capturedError: unknown = null;
+
+      // Lazy sheet: present() awaits the mount round-trip, which never completes in tests.
+      // Unmounting mid-wait is a normal teardown race (a screen closing during present),
+      // so the promise must resolve — a rejection here surfaces as an uncaught error in
+      // fire-and-forget callers.
+      await act(async () => {
+        sheet
+          .present()
+          .then(() => {
+            settled = true;
+          })
+          .catch((error: unknown) => {
+            capturedError = error;
+          });
+      });
+
+      await act(async () => {
+        unmount();
+      });
+
+      expect(capturedError).toBeNull();
+      expect(settled).toBe(true);
+      expect((NativeTrueSheetModule as any).presentByRef.mock.calls.length).toBe(
+        presentCallsBefore
+      );
+    });
+
+    it('settles every concurrent lazy present() call on mount', async () => {
+      const handleSpy = jest.spyOn(TrueSheet.prototype as any, 'handle', 'get').mockReturnValue(1);
+
+      const ref = createRef<any>();
+      render(
+        <TrueSheet ref={ref} name="concurrent-lazy">
+          <Text>Lazy Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      let settledFirst = false;
+      let settledSecond = false;
+
+      // Two presents before the native view mounts must both wait on the same mount
+      // and both settle — a single overwritten resolver would strand the first.
+      await act(async () => {
+        sheet.present().then(() => {
+          settledFirst = true;
+        });
+        sheet.present().then(() => {
+          settledSecond = true;
+        });
+        sheet.onMount({} as any);
+      });
+
+      expect(settledFirst).toBe(true);
+      expect(settledSecond).toBe(true);
+
+      handleSpy.mockRestore();
+    });
+
+    it('resets isPresenting after a failed native present so a later dismiss can unmount', async () => {
+      // Live handle so the mocked rejection below is actually consumed by this present().
+      const handleSpy = jest.spyOn(TrueSheet.prototype as any, 'handle', 'get').mockReturnValue(1);
+      (NativeTrueSheetModule as any).presentByRef.mockImplementationOnce(() =>
+        Promise.reject(new Error('native present failed'))
+      );
+
+      const ref = createRef<any>();
+      const { getByText, queryByText } = render(
+        <TrueSheet ref={ref} name="wedge-test" initialDetentIndex={0}>
+          <Text>Wedge Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      expect(getByText('Wedge Content')).toBeDefined();
+
+      await act(async () => {
+        await sheet.present().catch(() => {});
+      });
+
+      // The finally block resets the guard even though the native call rejected (#590).
+      expect(sheet.isPresenting).toBe(false);
+
+      await act(async () => {
+        sheet.onDidDismiss({} as DidDismissEvent);
+      });
+
+      expect(queryByText('Wedge Content')).toBeNull();
+
+      handleSpy.mockRestore();
+    });
+
+    it('ignores present() once the sheet is unmounted', async () => {
+      const ref = createRef<any>();
+      const { unmount } = render(
+        <TrueSheet ref={ref} name="present-after-unmount" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      await act(async () => {
+        unmount();
+      });
+
+      const presentCallsBefore = (NativeTrueSheetModule as any).presentByRef.mock.calls.length;
+      await expect(sheet.present()).resolves.toBeUndefined();
+      expect((NativeTrueSheetModule as any).presentByRef.mock.calls.length).toBe(
+        presentCallsBefore
+      );
+    });
+
+    it('handleBackPress falls through (returns false) when the native tag is gone', () => {
+      const ref = createRef<any>();
+      render(
+        <TrueSheet ref={ref} name="backpress-teardown" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      sheet.isPresented = true;
+      sheet.isSheetVisible = true;
+      // Simulate teardown: the native handle is no longer resolvable (#718).
+      sheet.nativeRef.current = null;
+
+      expect(() => sheet.handleBackPress()).not.toThrow();
+      expect(sheet.handleBackPress()).toBe(false);
+    });
+  });
+
+  describe('suspended prop', () => {
+    it('keeps the native view mounted when suspended is toggled on', () => {
+      const { getByText, rerender } = render(
+        <TrueSheet name="suspend-mount" initialDetentIndex={0}>
+          <Text>Suspend Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByText('Suspend Content')).toBeDefined();
+
+      rerender(
+        <TrueSheet name="suspend-mount" initialDetentIndex={0} suspended>
+          <Text>Suspend Content</Text>
+        </TrueSheet>
+      );
+
+      // suspension is a native-only concern; the sheet stays logically presented in JS.
+      expect(getByText('Suspend Content')).toBeDefined();
+    });
+
+    it('handleBackPress returns false while suspended', () => {
+      const ref = createRef<any>();
+      render(
+        <TrueSheet ref={ref} name="backpress-suspended" initialDetentIndex={0} suspended>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheet = ref.current;
+      sheet.isPresented = true;
+      sheet.isSheetVisible = true;
+
+      // The synchronous prop guard wins even before the native visibility event lands.
+      expect(sheet.handleBackPress()).toBe(false);
     });
   });
 });

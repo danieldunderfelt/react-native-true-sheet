@@ -137,6 +137,8 @@ export function useTrueSheet(): TrueSheetStaticMethods {
         dismiss: reject,
         dismissStack: reject,
         dismissAll: reject,
+        suspendAll: reject,
+        unsuspendAll: reject,
       };
     }
 
@@ -151,6 +153,10 @@ export function useTrueSheet(): TrueSheetStaticMethods {
           [...stack].reverse().map((entry) => entry.ref.current?.dismiss(animated))
         );
       },
+      // Suspension exists to step aside for native modal presentations, which
+      // have no web equivalent — no-op so cross-platform code can call it safely.
+      suspendAll: async () => {},
+      unsuspendAll: async () => {},
     };
   }, [ctx]);
 }

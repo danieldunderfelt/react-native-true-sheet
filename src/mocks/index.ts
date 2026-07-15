@@ -21,6 +21,8 @@ export class TrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
   );
   static resize = jest.fn((_name: string, _index: number) => Promise.resolve());
   static dismissAll = jest.fn((_animated?: boolean) => Promise.resolve());
+  static suspendAll = jest.fn(() => Promise.resolve());
+  static unsuspendAll = jest.fn(() => Promise.resolve());
 
   dismiss = jest.fn((_animated?: boolean) => Promise.resolve());
   dismissStack = jest.fn((_animated?: boolean) => Promise.resolve());
@@ -83,6 +85,8 @@ export function useTrueSheet(): TrueSheetStaticMethods {
     dismissStack: TrueSheet.dismissStack,
     resize: TrueSheet.resize,
     dismissAll: TrueSheet.dismissAll,
+    suspendAll: TrueSheet.suspendAll,
+    unsuspendAll: TrueSheet.unsuspendAll,
   };
 }
 

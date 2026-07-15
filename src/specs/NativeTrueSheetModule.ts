@@ -53,6 +53,21 @@ interface Spec extends TurboModule {
   dismissAll(animated: boolean): Promise<void>;
 
   /**
+   * Suspend every currently open sheet: each captured sheet steps aside natively
+   * (dismissed on iOS, hidden on Android) while staying logically presented.
+   * Sheets presented after this call are unaffected.
+   * @returns Promise that resolves when suspension has been initiated
+   */
+  suspendAll(): Promise<void>;
+
+  /**
+   * Re-present the sheets captured by `suspendAll`, restoring each at its
+   * remembered detent without re-emitting present events.
+   * @returns Promise that resolves when re-presentation has been initiated
+   */
+  unsuspendAll(): Promise<void>;
+
+  /**
    * Handle back press for a sheet (Android only)
    * Dismisses or collapses to the lowest detent natively
    * @param viewTag - Native view tag of the sheet component

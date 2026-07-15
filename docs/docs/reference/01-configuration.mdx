@@ -216,6 +216,18 @@ Used with `initialDetentIndex`.
 | - | - | - | - | - |
 | `boolean` | `true` | ✅ | ✅ | ✅ |
 
+## `suspended`
+
+While `true`, the sheet steps aside natively — dismissed on iOS, hidden on Android — **without reporting a close**. It stays logically presented, keeps its mounted content and remembered detent, and returns at that detent when set back to `false`. No `onWillDismiss`/`onDidDismiss` (on suspend) or `onWillPresent`/`onDidPresent` (on resume) fire; `onWillBlur`/`onWillFocus` and `onVisibilityChange` do.
+
+Use it to let a full-screen native `Modal` present over an open sheet — on iOS the two share a presenter, so the sheet must step aside first — then bring the sheet back when the modal is gone. Flip it back to `false` from the modal's dismiss callback for a race-free return.
+
+Calling `dismiss()` (or `dismissAll()`) while suspended performs a real close; the sheet will not return on resume.
+
+| Type | Default | 🍎 | 🤖 | 🌐 |
+| - | - | - | - | - |
+| `boolean` | `false` | ✅ | ✅ | – |
+
 ## `grabber`
 
 Shows a native grabber (or drag handle) on the sheet.
