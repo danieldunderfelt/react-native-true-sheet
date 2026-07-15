@@ -152,16 +152,28 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
   return self;
 }
 
+// Registers this view in the module's tag→view registry so ref-based present/resize/dismiss can
+// resolve it. Idempotent and keyed to self.tag, so it is safe to call from every lifecycle point
+// that might run first. Registering only from didMoveToWindow was not enough: on a recycled view
+// (Fabric reuses the instance when a screen is re-entered) the JS mount event that present() awaits
+// can be delivered before the view re-attaches to its window, so present() would call the module
+// with a tag that wasn't registered yet and fail with SHEET_NOT_FOUND — the sheet then silently
+// never appears. finalizeUpdates also calls this, registering during the same Fabric mount
+// transaction the mount event rides, which closes that race.
+- (void)registerViewIfNeeded {
+  if (self.tag > 0 && _registeredTag != self.tag) {
+    _registeredTag = self.tag;
+    [TrueSheetModule registerView:self withTag:@(self.tag)];
+  }
+}
+
 - (void)didMoveToWindow {
   [super didMoveToWindow];
 
   if (!self.window)
     return;
 
-  if (self.tag > 0) {
-    _registeredTag = self.tag;
-    [TrueSheetModule registerView:self withTag:@(self.tag)];
-  }
+  [self registerViewIfNeeded];
 
   if (_pendingNavigationRepresent && !_controller.isPresented) {
     _pendingNavigationRepresent = NO;
@@ -397,6 +409,11 @@ typedef NS_OPTIONS(NSUInteger, TrueSheetHideReason) {
 
 - (void)finalizeUpdates:(RNComponentViewUpdateMask)updateMask {
   [super finalizeUpdates:updateMask];
+
+  // Register during the mount transaction so the view is resolvable by tag before the mount event
+  // reaches JS — a present()/resize() issued right after onMount must not race view registration
+  // (see registerViewIfNeeded). Runs before emitting the pending mount event below for that reason.
+  [self registerViewIfNeeded];
 
   // Emit pending mount event now that eventEmitter is available
   if (_pendingMountEvent && (updateMask & RNComponentViewUpdateMaskEventEmitter)) {
