@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.1.0
+
 ### 🎉 New features
 
 - **iOS**, **Android**: New `suspended` prop steps a presented sheet aside natively — dismissed on iOS, hidden on Android — without reporting a close. The sheet stays logically presented, keeps its content and detent, and returns when unset, so a full-screen native `Modal` can present over it. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
