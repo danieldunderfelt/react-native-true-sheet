@@ -1,6 +1,6 @@
 import type { RefObject } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import type { TrueSheetProps } from '@lodev09/react-native-true-sheet';
+import type { TrueSheetProps } from '@danieldunderfelt/react-native-true-sheet';
 
 import { Button } from '../components/Button';
 import { DemoContent } from '../components/DemoContent';

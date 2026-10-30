@@ -1,5 +1,5 @@
 import { NavigationContainer } from '@react-navigation/native';
-import { ReanimatedTrueSheetProvider } from '@lodev09/react-native-true-sheet/reanimated';
+import { ReanimatedTrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet/reanimated';
 import { MapProvider } from '@lugg/maps';
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? '';
 

@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { useRouter } from 'expo-router';
-import type { TrueSheet } from '@lodev09/react-native-true-sheet';
+import type { TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
 
 import { Button } from '@example/shared/components';
 import { BlankSheet } from '@example/shared/sheets';

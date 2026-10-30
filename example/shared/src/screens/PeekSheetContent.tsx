@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { TrueSheetPeek } from '@lodev09/react-native-true-sheet';
+import { TrueSheetPeek } from '@danieldunderfelt/react-native-true-sheet';
 
 import { Button } from '../components/Button';
 import { DemoContent } from '../components/DemoContent';

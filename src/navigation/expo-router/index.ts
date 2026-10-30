@@ -62,7 +62,7 @@ type SheetProps = Omit<React.ComponentProps<typeof SheetNavigator>, 'screenListe
  * @example
  * ```tsx
  * // app/sheet/_layout.tsx
- * import { Sheet } from '@lodev09/react-native-true-sheet/navigation/expo-router';
+ * import { Sheet } from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router';
  *
  * export default function SheetLayout() {
  *   return (

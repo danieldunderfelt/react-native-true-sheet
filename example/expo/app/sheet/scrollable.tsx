@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { ScrollView } from 'react-native';
-import { useTrueSheetNavigation } from '@lodev09/react-native-true-sheet/navigation/expo-router';
+import { useTrueSheetNavigation } from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router';
 import { useRouter } from 'expo-router';
 
 import { ScrollableSheetContent } from '@example/shared/screens';

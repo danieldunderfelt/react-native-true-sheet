@@ -1,9 +1,9 @@
 import { Platform, StyleSheet } from 'react-native';
-import { Sheet } from '@lodev09/react-native-true-sheet/navigation/expo-router';
+import { Sheet } from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router';
 
 import { Footer, Header } from '@example/shared/components';
 import { DARK, DARK_GRAY } from '@example/shared/utils';
-import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
+import { TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
 
 export const unstable_settings = {
   initialRouteName: 'index',

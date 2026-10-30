@@ -7,7 +7,7 @@ import {
 
 /**
  * Mock Sheet layout for testing.
- * Import from '@lodev09/react-native-true-sheet/navigation/expo-router/mock' in your test setup.
+ * Import from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router/mock' in your test setup.
  */
 export const Sheet = Object.assign(
   jest.fn(({ children }: { children: React.ReactNode }) => children),

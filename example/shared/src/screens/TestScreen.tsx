@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { Platform, PlatformColor, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { TrueSheet, TrueSheetProvider } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, TrueSheetProvider } from '@danieldunderfelt/react-native-true-sheet';
 
 import { BLUE, DARK, GAP, LIGHT_GRAY, SPACING } from '../utils';
 import { Button, Header, Spacer } from '../components';

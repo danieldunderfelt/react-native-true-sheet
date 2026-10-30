@@ -10,7 +10,7 @@ import {
   Platform,
   Pressable,
 } from 'react-native';
-import { TrueSheet, type TrueSheetProps } from '@lodev09/react-native-true-sheet';
+import { TrueSheet, type TrueSheetProps } from '@danieldunderfelt/react-native-true-sheet';
 
 import {
   BORDER_RADIUS,

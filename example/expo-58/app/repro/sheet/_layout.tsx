@@ -1,4 +1,4 @@
-import { Sheet } from '@lodev09/react-native-true-sheet/navigation/expo-router';
+import { Sheet } from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router';
 
 export const unstable_settings = {
   anchor: 'index',

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { TrueSheet } from '@lodev09/react-native-true-sheet';
-import { useTrueSheetNavigation } from '@lodev09/react-native-true-sheet/navigation/expo-router';
+import { TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
+import { useTrueSheetNavigation } from '@danieldunderfelt/react-native-true-sheet/navigation/expo-router';
 
 import { Button, DemoContent, Footer } from '@example/shared/components';
 import { DARK, GAP, LIGHT_GRAY, SPACING } from '@example/shared/utils';
