@@ -39,24 +39,49 @@
 
 using namespace facebook::react;
 
+// A deferred present that is still blocked after this many replays, or this
+// long after it was first deferred, fails with PRESENT_TIMEOUT.
+static const NSUInteger TrueSheetPresentMaxAttempts = 10;
+static const CFTimeInterval TrueSheetPresentTimeout = 2.0;
+
 @interface TrueSheetView () <TrueSheetViewControllerDelegate,
   TrueSheetContainerViewDelegate,
   RNScreensEventObserverDelegate>
+
+// The `suspended` prop or suspendAll holds the sheet
+@property (nonatomic, readonly) BOOL isSuspended;
+
 @end
 
 // Runs the block on the main queue once the controller's transition ends, or
-// on the next main-queue turn when it has none.
+// on the next main-queue turn when it has none (or it won't take a completion).
 static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_block_t block) {
-  id<UIViewControllerTransitionCoordinator> coordinator = controller.transitionCoordinator;
-  if (!coordinator) {
+  BOOL queued = [controller.transitionCoordinator
+    animateAlongsideTransition:nil
+                    completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                      dispatch_async(dispatch_get_main_queue(), block);
+                    }];
+
+  if (!queued) {
     dispatch_async(dispatch_get_main_queue(), block);
-    return;
+  }
+}
+
+static NSError *TrueSheetError(TrueSheetErrorCode code, NSString *message) {
+  return [NSError errorWithDomain:@"com.lodev09.TrueSheet" code:code userInfo:@{NSLocalizedDescriptionKey : message}];
+}
+
+// A present that replaces a deferred one settles both callers with its outcome.
+static TrueSheetCompletionBlock TrueSheetJoinCompletions(
+  TrueSheetCompletionBlock first, TrueSheetCompletionBlock second) {
+  if (!first || !second) {
+    return first ?: second;
   }
 
-  [coordinator animateAlongsideTransition:nil
-                               completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
-                                 dispatch_async(dispatch_get_main_queue(), block);
-                               }];
+  return ^(BOOL success, NSError *_Nullable error) {
+    first(success, error);
+    second(success, error);
+  };
 }
 
 @implementation TrueSheetView {
@@ -70,20 +95,48 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   TrueSheetViewInsetAdjustment _insetAdjustment;
   ScrollableOptions *_scrollableOptions;
   NSInteger _scrollableHandle;
+  // Fabric zeroes self.tag before prepareForRecycle, so unregister by this instead
+  NSInteger _registeredTag;
   BOOL _initialDetentAnimated;
   BOOL _isSheetUpdatePending;
   BOOL _pendingLayoutUpdate;
   BOOL _didInitiallyPresent;
   BOOL _dismissedByNavigation;
+  BOOL _dismissedByPresenterTeardown;
   BOOL _pendingNavigationRepresent;
   BOOL _pendingMountEvent;
   BOOL _pendingSizeChange;
   BOOL _pendingPropsUpdate;
-  BOOL _isPresentPending;
-  NSUInteger _pendingPresentGeneration;
-  TrueSheetCompletionBlock _pendingPresentCompletion;
   NSArray *_pendingDetents;
   RNScreensEventObserver *_screensEventObserver;
+
+  // Single-slot deferred present: parked behind an in-flight transition (replayed
+  // once it ends) or until the container mounts (replayed from mountChildComponentView).
+  BOOL _isPresentPending;
+  BOOL _isPresentPendingContent;
+  NSInteger _pendingPresentIndex;
+  BOOL _pendingPresentAnimated;
+  BOOL _pendingPresentSilent;
+  NSUInteger _pendingPresentGeneration;
+  NSUInteger _pendingPresentAttempts;
+  CFTimeInterval _pendingPresentDeferredAt;
+  TrueSheetCompletionBlock _pendingPresentCompletion;
+  BOOL _isReplayingPendingPresent;
+  NSUInteger _replayAttempts;
+  CFTimeInterval _replayDeferredAt;
+
+  // Open from JS's point of view while stepped aside natively. Resurfaces at
+  // its remembered detent, silently unless JS never saw it open.
+  BOOL _logicallyOpen;
+  BOOL _resumeEmitsPresentEvents;
+  BOOL _suppressPresentEvents;
+  BOOL _visibilityHidden;
+  BOOL _hiddenByNavigation;
+  BOOL _suspendedProp;
+  BOOL _suspendedByModule;
+  BOOL _suspensionActive;
+  BOOL _dismissingForSuspension;
+  BOOL _applySuspendAfterPresent;
 }
 
 #pragma mark - Initialization
@@ -113,19 +166,28 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   return self;
 }
 
+// Also called from finalizeUpdates: a recycled host can deliver its mount event —
+// which JS awaits before calling present() — before it re-attaches to a window.
+- (void)registerViewIfNeeded {
+  if (self.tag <= 0 || self.tag == _registeredTag)
+    return;
+
+  [TrueSheetModule unregisterView:self withTag:@(_registeredTag)];
+  _registeredTag = self.tag;
+  [TrueSheetModule registerView:self withTag:@(self.tag)];
+}
+
 - (void)didMoveToWindow {
   [super didMoveToWindow];
 
   if (!self.window)
     return;
 
-  if (self.tag > 0) {
-    [TrueSheetModule registerView:self withTag:@(self.tag)];
-  }
+  [self registerViewIfNeeded];
 
   if (_pendingNavigationRepresent && !_controller.isPresented) {
     _pendingNavigationRepresent = NO;
-    [self presentAtIndex:_controller.activeDetentIndex animated:YES completion:nil];
+    [self representIfNeeded];
     return;
   }
 
@@ -140,6 +202,13 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 - (void)presentInitialIfNeeded {
   if (_initialDetentIndex < 0 || _didInitiallyPresent)
     return;
+
+  // Mounted suspended: open now, present once resumed
+  if (self.isSuspended) {
+    _didInitiallyPresent = YES;
+    [self recordPresentAtIndex:_initialDetentIndex];
+    return;
+  }
 
   UIViewController *vc = [self findPresentingViewController];
 
@@ -189,16 +258,11 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   [_screensEventObserver stopObserving];
   _screensEventObserver = nil;
 
-  [self cancelPendingPresent];
+  [self cancelPendingPresentWithReason:@"deallocated"];
 
-  if (_controller && _controller.presentingViewController) {
-    // Find the root presenting controller to dismiss the entire stack
-    UIViewController *root = _controller.presentingViewController;
-    while (root.presentingViewController != nil) {
-      root = root.presentingViewController;
-    }
-    [root dismissViewControllerAnimated:YES completion:nil];
-  }
+  // Scoped to this sheet's own presenter and non-animated — never the chain
+  // root, which would also tear down unrelated modals and parent sheets.
+  [self orphanController];
 
   _didInitiallyPresent = NO;
   _dismissedByNavigation = NO;
@@ -414,6 +478,9 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 - (void)finalizeUpdates:(RNComponentViewUpdateMask)updateMask {
   [super finalizeUpdates:updateMask];
 
+  // Before the mount event below, so a present() issued from onMount resolves the tag
+  [self registerViewIfNeeded];
+
   // Emit pending mount event now that eventEmitter is available
   if (_pendingMountEvent && (updateMask & RNComponentViewUpdateMaskEventEmitter)) {
     _pendingMountEvent = NO;
@@ -422,6 +489,12 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 
   if (!(updateMask & RNComponentViewUpdateMaskProps) || !_controller)
     return;
+
+  BOOL suspended = std::static_pointer_cast<TrueSheetViewProps const>(_props)->suspended;
+  if (suspended != _suspendedProp) {
+    _suspendedProp = suspended;
+    [self reconcileSuspension];
+  }
 
   [self setupScrollable];
 
@@ -441,33 +514,50 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 - (void)prepareForRecycle {
   [super prepareForRecycle];
 
-  // Pooled mid-dismissal: the next mount can reuse this host — and its
-  // controller — while the previous sheet is still animating out. Detach until
-  // that transition ends so its tail (didBlur, didDismiss, position) can't reach
-  // the new mount, then hand the controller back and let auto-present retry.
-  if (_controller.isBeingDismissed) {
-    _controller.delegate = nil;
+  [TrueSheetModule unregisterView:self withTag:@(_registeredTag)];
+  _registeredTag = 0;
 
-    __weak __typeof(self) weakSelf = self;
-    TrueSheetRunAfterTransition(_controller, ^{
-      __typeof(self) strongSelf = weakSelf;
-      if (!strongSelf)
-        return;
+  [self cancelPendingPresentWithReason:@"recycled"];
+  [_screensEventObserver stopObserving];
 
-      strongSelf->_controller.delegate = strongSelf;
-      strongSelf->_controller.activeDetentIndex = -1;
-      if (strongSelf.window) {
-        [strongSelf presentInitialIfNeeded];
-      }
-    });
+  // The pool defers dealloc indefinitely, so a controller still presented or
+  // mid-transition would carry into the next mount. Detach it so its tail
+  // (didBlur, didDismiss, position) can't reach that mount, let it tear itself
+  // down, and start the next mount on a fresh controller.
+  if ([self orphanController]) {
+    // Owned by the orphan's view until it's torn down
+    _snapshotView = nil;
+
+    _controller = [[TrueSheetViewController alloc] init];
+    _controller.delegate = self;
   }
 
-  [self cancelPendingPresent];
+  _controller.activeDetentIndex = -1;
+  _controller.dismissedWithPresenter = NO;
 
   _lastStateSize = CGSizeZero;
   _didInitiallyPresent = NO;
   _dismissedByNavigation = NO;
+  _dismissedByPresenterTeardown = NO;
   _pendingNavigationRepresent = NO;
+
+  _logicallyOpen = NO;
+  _resumeEmitsPresentEvents = NO;
+  _suppressPresentEvents = NO;
+  _visibilityHidden = NO;
+  _hiddenByNavigation = NO;
+  _suspendedProp = NO;
+  _suspendedByModule = NO;
+  _suspensionActive = NO;
+  _dismissingForSuspension = NO;
+  _applySuspendAfterPresent = NO;
+
+  // Queued for the previous mount's presentation — the next mount would replay them
+  _pendingDetents = nil;
+  _pendingPropsUpdate = NO;
+  _pendingSizeChange = NO;
+  _pendingLayoutUpdate = NO;
+  _isSheetUpdatePending = NO;
 }
 
 #pragma mark - Child Component Mounting
@@ -530,6 +620,11 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   } else {
     _pendingMountEvent = YES;
   }
+
+  // Replayed next turn, once the rest of this mount transaction has landed
+  if (_isPresentPendingContent) {
+    [self flushPendingPresent];
+  }
 }
 
 - (void)unmountChildComponentView:(UIView<RCTComponentViewProtocol> *)childComponentView index:(NSInteger)index {
@@ -557,7 +652,46 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 - (void)presentAtIndex:(NSInteger)index
               animated:(BOOL)animated
             completion:(nullable TrueSheetCompletionBlock)completion {
-  if (_controller.isBeingPresented || _controller.isPresented || _isPresentPending) {
+  [self presentAtIndex:index animated:animated silent:NO completion:completion];
+}
+
+// `silent` resurfaces a sheet JS already considers open, without present events.
+- (void)presentAtIndex:(NSInteger)index
+              animated:(BOOL)animated
+                silent:(BOOL)silent
+            completion:(nullable TrueSheetCompletionBlock)completion {
+  if (self.isSuspended) {
+    [self recordPresentAtIndex:index];
+    RCTLogWarn(@"TrueSheet: sheet is suspended. It will present at index %ld when resumed.", (long)index);
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
+  // Already deferred: this request replaces it, and replays from the same trigger
+  if (_isPresentPending) {
+    [self parkPresentAtIndex:index
+                    animated:animated
+                      silent:silent
+             awaitingContent:_isPresentPendingContent
+                  completion:completion];
+    return;
+  }
+
+  // isPresented stays YES while our own controller animates out — defer instead
+  // of resolving through the guard below. Also covers a cancelled interactive
+  // dismissal, which never reaches viewControllerDidDismiss.
+  if (_controller.isBeingDismissed) {
+    [self deferPresentAtIndex:index
+                     animated:animated
+                       silent:silent
+            afterTransitionOf:_controller
+                   completion:completion];
+    return;
+  }
+
+  if (_controller.isBeingPresented || _controller.isPresented) {
     RCTLogWarn(@"TrueSheet: sheet is already presented. Use resize() to change detent.");
     if (completion) {
       completion(YES, nil);
@@ -575,44 +709,32 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
         @"TrueSheet: sheet is not in a window. Present it once its screen is visible, or use initialDetentIndex.");
     }
 
-    NSError *error = [NSError errorWithDomain:@"com.lodev09.TrueSheet"
-                                         code:1001
-                                     userInfo:@{NSLocalizedDescriptionKey : @"No presenting view controller found"}];
     if (completion) {
-      completion(NO, error);
+      completion(NO, TrueSheetError(TrueSheetErrorCodeNoPresenter, @"No presenting view controller found"));
     }
     return;
   }
 
-  // A controller still animating out of the presenter (e.g. a navigation modal
-  // closing) makes UIKit queue this presentation, so everything measured below
-  // goes stale before it starts. Present once that transition ends.
+  // A controller still animating out of the presenter (a sheet, an RN Modal, or a
+  // navigation modal) makes UIKit queue this presentation — or drop it along with
+  // its completion — and everything measured below goes stale. Present once that
+  // transition ends.
   UIViewController *dismissing = presentingViewController.presentedViewController;
-  id<UIViewControllerTransitionCoordinator> dismissCoordinator =
-    dismissing.isBeingDismissed ? dismissing.transitionCoordinator : nil;
-  if (dismissCoordinator) {
-    _isPresentPending = YES;
-    _pendingPresentCompletion = completion;
-    NSUInteger generation = ++_pendingPresentGeneration;
-
-    __weak __typeof(self) weakSelf = self;
-    [dismissCoordinator
-      animateAlongsideTransition:nil
-                      completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                          __typeof(self) strongSelf = weakSelf;
-                          if (!strongSelf || !strongSelf->_isPresentPending ||
-                              strongSelf->_pendingPresentGeneration != generation)
-                            return;
-
-                          TrueSheetCompletionBlock pendingCompletion = strongSelf->_pendingPresentCompletion;
-                          strongSelf->_isPresentPending = NO;
-                          strongSelf->_pendingPresentCompletion = nil;
-                          [strongSelf presentAtIndex:index animated:animated completion:pendingCompletion];
-                        });
-                      }];
+  if (dismissing) {
+    [self deferPresentAtIndex:index animated:animated silent:silent afterTransitionOf:dismissing completion:completion];
     return;
   }
+
+  // Never present without content: the sheet would show empty, then vanish once
+  // the pending unmount settles.
+  if (!_containerView) {
+    [self parkPresentAtIndex:index animated:animated silent:silent awaitingContent:YES completion:completion];
+    return;
+  }
+
+  _dismissedByPresenterTeardown = NO;
+  _controller.dismissedWithPresenter = NO;
+  _suppressPresentEvents = silent;
 
   [_controller setupAnchorViewInView:presentingViewController.view];
   [_controller setupSheetSizing];
@@ -667,6 +789,15 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 }
 
 - (void)resizeToIndex:(NSInteger)index completion:(nullable TrueSheetCompletionBlock)completion {
+  // Stepped aside: resurfaces at this detent
+  if (_logicallyOpen && (!_controller.isPresented || _controller.isBeingDismissed)) {
+    _controller.activeDetentIndex = index;
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
   if (!_controller.isPresented) {
     RCTLogWarn(@"TrueSheet: Cannot resize. Sheet is not presented.");
     if (completion) {
@@ -704,9 +835,7 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
     return NO;
   }
 
-  TrueSheetCompletionBlock pendingCompletion = _pendingPresentCompletion;
-  _isPresentPending = NO;
-  _pendingPresentCompletion = nil;
+  TrueSheetCompletionBlock pendingCompletion = [self takePendingPresent];
   if (pendingCompletion) {
     pendingCompletion(YES, nil);
   }
@@ -715,11 +844,17 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 
 - (void)dismissAnimated:(BOOL)animated completion:(nullable TrueSheetCompletionBlock)completion {
   // Dismissing before a deferred present starts cancels it — nothing was presented.
-  if ([self cancelPendingPresent]) {
-    if (completion) {
-      completion(YES, nil);
-    }
-    return;
+  BOOL cancelledPresent = [self cancelPendingPresent];
+
+  // Closed while its presenter's teardown carries it down: turn the silent hide
+  // into a real close. Emit the will-dismiss it suppressed; didDismiss follows
+  // from the in-flight dismissal.
+  BOOL closedDuringTeardown = _dismissedByPresenterTeardown && !_dismissingForSuspension && !_dismissedByNavigation;
+  if (closedDuringTeardown) {
+    _dismissedByPresenterTeardown = NO;
+    _controller.dismissedWithPresenter = NO;
+    [self closeLogically];
+    [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
   }
 
   // Still animating in (isPresented flips at viewDidAppear): dismiss once the presentation lands
@@ -736,8 +871,39 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
     return;
   }
 
+  // Stepped aside, so there's no presentation to take down — close it for real
+  if (self.isHiddenWhileOpen) {
+    [self closeLogically];
+    [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
+    [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
+  if (cancelledPresent) {
+    if (completion) {
+      completion(YES, nil);
+    }
+    return;
+  }
+
   if (_controller.isBeingDismissed || !_controller.isPresented) {
-    RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
+    if (_controller.isBeingDismissed && _controller.dismissedWithPresenter && !_dismissedByPresenterTeardown) {
+      // Beat the teardown's (deferred) classification: let the in-flight
+      // dismissal report a normal close instead of resurfacing.
+      _controller.dismissedWithPresenter = NO;
+      [self closeLogically];
+    } else if (_controller.isBeingDismissed && _dismissingForSuspension) {
+      // The suspension hide is silent, so report the close here and keep the
+      // sheet from resurfacing on resume.
+      [self closeLogically];
+      [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
+      [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
+    } else if (!closedDuringTeardown) {
+      RCTLogWarn(@"TrueSheet: sheet is already dismissed. No need to dismiss it again.");
+    }
 
     if (completion) {
       completion(YES, nil);
@@ -798,6 +964,122 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
                                       completion(YES, nil);
                                     }
                                   }];
+}
+
+#pragma mark - Deferred Present
+
+// Returns NO when a replay ran out of retries — the caller was rejected with PRESENT_TIMEOUT.
+- (BOOL)parkPresentAtIndex:(NSInteger)index
+                  animated:(BOOL)animated
+                    silent:(BOOL)silent
+           awaitingContent:(BOOL)awaitingContent
+                completion:(nullable TrueSheetCompletionBlock)completion {
+  if (_isPresentPending) {
+    _pendingPresentIndex = index;
+    _pendingPresentAnimated = animated;
+    _pendingPresentSilent = _pendingPresentSilent && silent;
+    _pendingPresentCompletion = TrueSheetJoinCompletions(_pendingPresentCompletion, completion);
+    return YES;
+  }
+
+  // Content mounting is a deterministic signal, so only transition waits are bounded
+  NSUInteger attempts = 0;
+  CFTimeInterval deferredAt = CACurrentMediaTime();
+  if (_isReplayingPendingPresent && !awaitingContent) {
+    attempts = _replayAttempts;
+    deferredAt = _replayDeferredAt;
+
+    if (attempts >= TrueSheetPresentMaxAttempts || CACurrentMediaTime() - deferredAt > TrueSheetPresentTimeout) {
+      if (completion) {
+        completion(NO, TrueSheetError(TrueSheetErrorCodePresentTimeout,
+                         @"Presentation timed out waiting for an in-flight transition"));
+      }
+      return NO;
+    }
+  }
+
+  _isPresentPending = YES;
+  _isPresentPendingContent = awaitingContent;
+  _pendingPresentIndex = index;
+  _pendingPresentAnimated = animated;
+  _pendingPresentSilent = silent;
+  _pendingPresentCompletion = completion;
+  _pendingPresentAttempts = attempts;
+  _pendingPresentDeferredAt = deferredAt;
+  _pendingPresentGeneration++;
+  return YES;
+}
+
+- (void)deferPresentAtIndex:(NSInteger)index
+                   animated:(BOOL)animated
+                     silent:(BOOL)silent
+          afterTransitionOf:(UIViewController *)controller
+                 completion:(nullable TrueSheetCompletionBlock)completion {
+  if (![self parkPresentAtIndex:index animated:animated silent:silent awaitingContent:NO completion:completion]) {
+    return;
+  }
+
+  NSUInteger generation = _pendingPresentGeneration;
+  __weak __typeof(self) weakSelf = self;
+  TrueSheetRunAfterTransition(controller, ^{
+    [weakSelf replayPendingPresentWithGeneration:generation];
+  });
+}
+
+// Replays on the next turn — presenting from within UIKit's dismissal callbacks gets dropped.
+- (void)flushPendingPresent {
+  if (!_isPresentPending) {
+    return;
+  }
+
+  NSUInteger generation = _pendingPresentGeneration;
+  __weak __typeof(self) weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [weakSelf replayPendingPresentWithGeneration:generation];
+  });
+}
+
+// Several triggers can replay the same deferral; the first wins, and a stale one
+// (from a cancelled or re-deferred present) finds a different generation.
+- (void)replayPendingPresentWithGeneration:(NSUInteger)generation {
+  if (!_isPresentPending || _pendingPresentGeneration != generation) {
+    return;
+  }
+
+  NSInteger index = _pendingPresentIndex;
+  BOOL animated = _pendingPresentAnimated;
+  BOOL silent = _pendingPresentSilent;
+  BOOL boundsRetries = !_isPresentPendingContent;
+  NSUInteger attempts = _pendingPresentAttempts;
+  CFTimeInterval deferredAt = _pendingPresentDeferredAt;
+  TrueSheetCompletionBlock completion = [self takePendingPresent];
+
+  _isReplayingPendingPresent = boundsRetries;
+  _replayAttempts = attempts + 1;
+  _replayDeferredAt = deferredAt;
+  [self presentAtIndex:index animated:animated silent:silent completion:completion];
+  _isReplayingPendingPresent = NO;
+}
+
+- (nullable TrueSheetCompletionBlock)takePendingPresent {
+  TrueSheetCompletionBlock completion = _pendingPresentCompletion;
+  _isPresentPending = NO;
+  _isPresentPendingContent = NO;
+  _pendingPresentCompletion = nil;
+  return completion;
+}
+
+// The host is going away: reject rather than resolve, nothing will present.
+- (void)cancelPendingPresentWithReason:(NSString *)reason {
+  if (!_isPresentPending) {
+    return;
+  }
+
+  TrueSheetCompletionBlock completion = [self takePendingPresent];
+  if (completion) {
+    completion(NO, TrueSheetError(TrueSheetErrorCodePresentCancelled,
+                     [NSString stringWithFormat:@"Presentation cancelled: %@", reason]));
+  }
 }
 
 #pragma mark - TrueSheetContainerViewDelegate
@@ -904,11 +1186,15 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   _controller.activeDetentIndex = index;
   // Before emitting, so an input focused in onWillPresent raises a tracked keyboard
   [_containerView setupKeyboardObserverWithViewController:_controller];
-  [TrueSheetLifecycleEvents emitWillPresent:_eventEmitter index:index position:position detent:detent];
+  if (!_suppressPresentEvents) {
+    [TrueSheetLifecycleEvents emitWillPresent:_eventEmitter index:index position:position detent:detent];
+  }
 }
 
 - (void)viewControllerDidPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent {
-  [TrueSheetLifecycleEvents emitDidPresent:_eventEmitter index:index position:position detent:detent];
+  if (!_suppressPresentEvents) {
+    [TrueSheetLifecycleEvents emitDidPresent:_eventEmitter index:index position:position detent:detent];
+  }
 
   if (_pendingPropsUpdate) {
     _pendingPropsUpdate = NO;
@@ -918,6 +1204,17 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   if (_pendingSizeChange) {
     _pendingSizeChange = NO;
     [self setupSheetDetentsForSizeChange];
+  }
+
+  _suppressPresentEvents = NO;
+  _logicallyOpen = NO;
+  _resumeEmitsPresentEvents = NO;
+  [self emitVisibilityChange:YES];
+
+  // Suspended while presenting — step aside now that the presentation landed
+  if (_applySuspendAfterPresent) {
+    _applySuspendAfterPresent = NO;
+    [self reconcileSuspension];
   }
 }
 
@@ -941,8 +1238,24 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   }
 }
 
+// The sheet is going down only because its presenter (a closing modal route, an
+// RN Modal, …) is being dismissed beneath it. Nobody closed it: keep it open,
+// stay silent, and resurface it once the teardown settles.
+- (void)markPresenterTeardownIfNeeded {
+  if (_dismissedByPresenterTeardown || _dismissedByNavigation || _dismissingForSuspension ||
+      !_controller.dismissedWithPresenter) {
+    return;
+  }
+
+  _dismissedByPresenterTeardown = YES;
+  _logicallyOpen = YES;
+  _resumeEmitsPresentEvents = NO;
+  [self emitVisibilityChange:NO];
+}
+
 - (void)viewControllerWillDismiss {
-  if (!_dismissedByNavigation) {
+  [self markPresenterTeardownIfNeeded];
+  if (!_dismissedByNavigation && !_dismissingForSuspension && !_dismissedByPresenterTeardown) {
     [TrueSheetLifecycleEvents emitWillDismiss:_eventEmitter];
   }
 }
@@ -952,13 +1265,48 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 }
 
 - (void)viewControllerDidDismiss {
+  [self markPresenterTeardownIfNeeded];
   [_containerView cleanupKeyboardObserver];
-  if (!_dismissedByNavigation) {
+  _suppressPresentEvents = NO;
+
+  if (_dismissedByPresenterTeardown) {
+    _dismissedByPresenterTeardown = NO;
+    _controller.dismissedWithPresenter = NO;
+
+    // An explicit present parked behind the teardown wins over the silent resurface
+    if (_isPresentPending) {
+      [self flushPendingPresent];
+      return;
+    }
+
+    // Once the presenter's teardown fully settles — the present gates absorb
+    // anything still in flight
+    __weak __typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf representWhenAttached];
+    });
+    return;
+  }
+
+  if (!_dismissedByNavigation && !_dismissingForSuspension) {
     _dismissedByNavigation = NO;
     _pendingNavigationRepresent = NO;
 
     _controller.activeDetentIndex = -1;
     [TrueSheetLifecycleEvents emitDidDismiss:_eventEmitter];
+  }
+
+  _dismissingForSuspension = NO;
+
+  // Replay a present parked behind this dismissal, whatever caused it
+  [self flushPendingPresent];
+
+  // Unsuspended (or its screen reappeared) while the hide was still animating
+  if (_logicallyOpen) {
+    __weak __typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf representIfNeeded];
+    });
   }
 }
 
@@ -966,13 +1314,19 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
   if (_controller.activeDetentIndex != index) {
     _controller.activeDetentIndex = index;
   }
-  [TrueSheetStateEvents emitDetentChange:_eventEmitter index:index position:position detent:detent];
+  if (!_dismissingForSuspension && !_suppressPresentEvents) {
+    [TrueSheetStateEvents emitDetentChange:_eventEmitter index:index position:position detent:detent];
+  }
 }
 
 - (void)viewControllerDidChangePosition:(CGFloat)index
                                position:(CGFloat)position
                                  detent:(CGFloat)detent
                                realtime:(BOOL)realtime {
+  // JS still sees the sheet at rest while it steps aside or resurfaces
+  if (_dismissingForSuspension || _suppressPresentEvents) {
+    return;
+  }
   [TrueSheetStateEvents emitPositionChange:_eventEmitter index:index position:position detent:detent realtime:realtime];
 }
 
@@ -1005,21 +1359,25 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 
 - (void)presenterScreenWillDisappear {
   if (_controller.isPresented && !_controller.isBeingDismissed) {
+    _hiddenByNavigation = YES;
     _dismissedByNavigation = YES;
+    _logicallyOpen = YES;
+    _resumeEmitsPresentEvents = YES;
     [self dismissAnimated:YES completion:nil];
+  } else if (_logicallyOpen) {
+    _hiddenByNavigation = YES;
   }
 }
 
 - (void)presenterScreenWillAppear {
-  if (_dismissedByNavigation && !_controller.isPresented && !_controller.isBeingPresented) {
-    _dismissedByNavigation = NO;
+  _hiddenByNavigation = NO;
 
-    if (self.window) {
-      [self presentAtIndex:_controller.activeDetentIndex animated:YES completion:nil];
-    } else {
-      _pendingNavigationRepresent = YES;
-    }
+  // A navigation dismissal still animating out stays silent — didDismiss resurfaces it
+  if (!_controller.isBeingDismissed) {
+    _dismissedByNavigation = NO;
   }
+
+  [self representWhenAttached];
 }
 
 - (void)presenterInteractiveDismissDidBegin {
@@ -1044,7 +1402,167 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
                                          }];
 }
 
+#pragma mark - Suspension
+
+- (BOOL)isSuspended {
+  return _suspendedProp || _suspendedByModule;
+}
+
+- (BOOL)isHiddenWhileOpen {
+  return _logicallyOpen && !_controller.isPresented && !_controller.isBeingPresented;
+}
+
+- (BOOL)isSteppedAside {
+  return self.isHiddenWhileOpen && (self.isSuspended || !_hiddenByNavigation);
+}
+
+- (BOOL)suspendFromModule {
+  if (_suspendedByModule) {
+    return YES;
+  }
+
+  // isPresented stays YES while a close animates out — capturing it would
+  // resurrect a sheet the app just dismissed. Structural hides (navigation,
+  // presenter teardown) stay open and remain capturable.
+  if (_controller.isBeingDismissed && !_logicallyOpen && !_isPresentPending && !_controller.dismissedWithPresenter) {
+    return NO;
+  }
+
+  // Only sheets open in some form, so ones presented afterwards (e.g. by the flow
+  // that suspended these) are unaffected
+  if (!_controller.isPresented && !_controller.isBeingPresented && !_isPresentPending && !_logicallyOpen) {
+    return NO;
+  }
+
+  _suspendedByModule = YES;
+  [self reconcileSuspension];
+  return YES;
+}
+
+- (void)resumeFromModule {
+  if (!_suspendedByModule) {
+    return;
+  }
+
+  _suspendedByModule = NO;
+  [self reconcileSuspension];
+}
+
+// The prop and module sources are independent — only the edge between "either
+// holds it" and "neither does" touches the native presentation.
+- (void)reconcileSuspension {
+  BOOL suspended = self.isSuspended;
+  if (suspended == _suspensionActive) {
+    return;
+  }
+  _suspensionActive = suspended;
+
+  if (!suspended) {
+    [self representWhenAttached];
+    return;
+  }
+
+  // A deferred present becomes the detent to resurface at
+  if (_isPresentPending) {
+    [self recordPresentAtIndex:_pendingPresentIndex];
+    [self cancelPendingPresent];
+  }
+
+  // Re-run once the presentation lands
+  if (_controller.isBeingPresented) {
+    _suspensionActive = NO;
+    _applySuspendAfterPresent = YES;
+    return;
+  }
+
+  // Not presented (or already closing for real): nothing to step aside from
+  if (!_controller.isPresented || _controller.isBeingDismissed) {
+    return;
+  }
+
+  _logicallyOpen = YES;
+  _resumeEmitsPresentEvents = NO;
+  _dismissingForSuspension = YES;
+  [self emitVisibilityChange:NO];
+  [_controller.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+}
+
+// Opens the sheet without presenting it. Its resurface emits present events
+// unless JS already saw it open.
+- (void)recordPresentAtIndex:(NSInteger)index {
+  if (!_logicallyOpen) {
+    _logicallyOpen = YES;
+    _resumeEmitsPresentEvents = !_controller.isPresented || _controller.isBeingDismissed;
+  }
+  _controller.activeDetentIndex = index;
+}
+
+- (void)closeLogically {
+  _logicallyOpen = NO;
+  _resumeEmitsPresentEvents = NO;
+  _visibilityHidden = NO;
+  _pendingNavigationRepresent = NO;
+  _controller.activeDetentIndex = -1;
+}
+
+- (void)representIfNeeded {
+  if (!_logicallyOpen || self.isSuspended || _hiddenByNavigation || _controller.isPresented ||
+      _controller.isBeingPresented || !self.window) {
+    return;
+  }
+
+  NSInteger index = _controller.activeDetentIndex >= 0 ? _controller.activeDetentIndex : MAX(_initialDetentIndex, 0);
+
+  __weak __typeof(self) weakSelf = self;
+  [self presentAtIndex:index
+              animated:YES
+                silent:!_resumeEmitsPresentEvents
+            completion:^(BOOL success, NSError *_Nullable error) {
+              // Still open after a timed-out wait — try again
+              if (!success && error.code == TrueSheetErrorCodePresentTimeout) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                  [weakSelf representIfNeeded];
+                });
+              }
+            }];
+}
+
+// A full-screen modal over the host's screen detaches it from the window;
+// didMoveToWindow resurfaces the sheet once UIKit restores it.
+- (void)representWhenAttached {
+  if (self.window) {
+    [self representIfNeeded];
+  } else if (_logicallyOpen) {
+    _pendingNavigationRepresent = YES;
+  }
+}
+
+- (void)emitVisibilityChange:(BOOL)visible {
+  if (_visibilityHidden == !visible) {
+    return;
+  }
+
+  _visibilityHidden = !visible;
+  [TrueSheetStateEvents emitVisibilityChange:_eventEmitter visible:visible];
+}
+
 #pragma mark - Private Helpers
+
+// Hands a controller that is still presented or mid-transition to its own
+// teardown, detached from this host. Returns whether it did.
+- (BOOL)orphanController {
+  TrueSheetViewController *controller = _controller;
+  if (!controller.isPresented && !controller.isBeingPresented && !controller.isBeingDismissed &&
+      !controller.presentingViewController) {
+    return NO;
+  }
+
+  controller.delegate = nil;
+  controller.accessibilityContentView = nil;
+  controller.orphanedAfterUnmount = YES;
+  [controller attemptOrphanTeardown];
+  return YES;
+}
 
 - (void)setupScrollable {
   if (!_containerView)
@@ -1116,10 +1634,12 @@ static void TrueSheetRunAfterTransition(UIViewController *controller, dispatch_b
 }
 
 - (UIViewController *)findPresentingViewController {
-  if (!self.window)
-    return nil;
-
-  UIViewController *rootViewController = self.window.rootViewController;
+  // Windowless while a full-screen modal covers the host's screen (UIKit removes
+  // the presenter's view) and briefly while it dismisses. The sheet's content
+  // lives in the controller, so present from the key window — the present gates
+  // absorb any transition still in flight.
+  UIWindow *window = self.window ?: [WindowUtil keyWindow];
+  UIViewController *rootViewController = window.rootViewController;
   if (!rootViewController)
     return nil;
 

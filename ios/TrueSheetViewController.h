@@ -96,6 +96,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL footerAvoidsKeyboard;
 @property (nonatomic, assign) BOOL dismissible;
 @property (nonatomic, assign) BOOL isPresented;
+
+/**
+ * Set once the host lets go of a controller that is still presented (recycle
+ * or dealloc). It then dismisses itself from its own presenter, non-animated,
+ * as soon as no transition or stacked child is in the way.
+ */
+@property (nonatomic, assign) BOOL orphanedAfterUnmount;
+
+/**
+ * YES when the current dismissal is collateral of the presenter itself being
+ * dismissed (e.g. a modal route closing beneath the sheet), not the sheet
+ * closing. A parent sheet dismissing its stack doesn't count.
+ */
+@property (nonatomic, assign) BOOL dismissedWithPresenter;
 @property (nonatomic, assign) NSInteger activeDetentIndex;
 
 /**
@@ -152,6 +166,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)invalidateDetents;
 - (void)setupDraggable;
 - (void)setupAnchorViewInView:(UIView *)parentView;
+- (void)attemptOrphanTeardown;
 
 - (void)beginInteractiveDismiss;
 - (void)updateInteractiveDismiss:(CGFloat)progress;

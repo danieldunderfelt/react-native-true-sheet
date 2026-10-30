@@ -18,8 +18,9 @@
 
 #import <TrueSheetSpec/TrueSheetSpec.h>
 
-// Static registry of live hosts by tag — weak so an unmounted host deallocates
-// (RN zeroes the tag before teardown, so hosts can't unregister themselves)
+// Static registry of live hosts by tag — weak so an unmounted host deallocates.
+// Recycled hosts stay alive in the pool and unregister by their cached tag
+// (RN zeroes self.tag before prepareForRecycle).
 static NSMapTable<NSNumber *, TrueSheetView *> *viewRegistry;
 
 @interface TrueSheetModule () <NativeTrueSheetModuleSpec>
@@ -64,9 +65,16 @@ RCT_EXPORT_MODULE(TrueSheetModule)
                        completion:^(BOOL success, NSError *_Nullable error) {
                          if (success) {
                            resolve(nil);
-                         } else {
-                           reject(@"PRESENT_FAILED", error.localizedDescription ?: @"Failed to present sheet", error);
+                           return;
                          }
+
+                         NSString *code = @"PRESENT_FAILED";
+                         if (error.code == TrueSheetErrorCodePresentTimeout) {
+                           code = @"PRESENT_TIMEOUT";
+                         } else if (error.code == TrueSheetErrorCodePresentCancelled) {
+                           code = @"PRESENT_CANCELLED";
+                         }
+                         reject(code, error.localizedDescription ?: @"Failed to present sheet", error);
                        }];
   });
 }
@@ -78,8 +86,9 @@ RCT_EXPORT_MODULE(TrueSheetModule)
   RCTExecuteOnMainQueue(^{
     TrueSheetView *trueSheetView = [TrueSheetModule getTrueSheetViewByTag:@((NSInteger)viewTag)];
 
+    // Already torn down (e.g. its screen closed) — nothing left to dismiss
     if (!trueSheetView) {
-      reject(@"SHEET_NOT_FOUND", [NSString stringWithFormat:@"No sheet found with tag %d", (int)viewTag], nil);
+      resolve(nil);
       return;
     }
 
@@ -101,8 +110,9 @@ RCT_EXPORT_MODULE(TrueSheetModule)
   RCTExecuteOnMainQueue(^{
     TrueSheetView *trueSheetView = [TrueSheetModule getTrueSheetViewByTag:@((NSInteger)viewTag)];
 
+    // Already torn down — nothing can be stacked on it
     if (!trueSheetView) {
-      reject(@"SHEET_NOT_FOUND", [NSString stringWithFormat:@"No sheet found with tag %d", (int)viewTag], nil);
+      resolve(nil);
       return;
     }
 
@@ -146,18 +156,52 @@ RCT_EXPORT_MODULE(TrueSheetModule)
   resolve(nil);
 }
 
+- (void)suspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  RCTExecuteOnMainQueue(^{
+    @synchronized(viewRegistry) {
+      // Only sheets open right now are captured, so sheets presented afterwards
+      // (e.g. by the flow that suspended these) behave normally
+      for (TrueSheetView *view in viewRegistry.objectEnumerator.allObjects) {
+        [view suspendFromModule];
+      }
+    }
+    resolve(nil);
+  });
+}
+
+- (void)unsuspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  RCTExecuteOnMainQueue(^{
+    @synchronized(viewRegistry) {
+      for (TrueSheetView *view in viewRegistry.objectEnumerator.allObjects) {
+        [view resumeFromModule];
+      }
+    }
+    resolve(nil);
+  });
+}
+
 - (void)dismissAll:(BOOL)animated resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   RCTExecuteOnMainQueue(^{
     @synchronized(viewRegistry) {
-      // Drop presents still waiting on another sheet's dismissal
-      for (TrueSheetView *view in viewRegistry.objectEnumerator) {
+      NSArray<TrueSheetView *> *views = viewRegistry.objectEnumerator.allObjects;
+
+      // Drop presents still waiting on another sheet's dismissal or on their content
+      for (TrueSheetView *view in views) {
         [view cancelPendingPresent];
+      }
+
+      // Sheets stepped aside natively hold no presentation for the root dismissal
+      // below to take down — close them directly so they can't resurface later
+      for (TrueSheetView *view in views) {
+        if (view.isSteppedAside) {
+          [view dismissAnimated:NO completion:nil];
+        }
       }
 
       // Find the root presented sheet (one without a parent TrueSheet)
       TrueSheetView *rootSheet = nil;
 
-      for (TrueSheetView *view in viewRegistry.objectEnumerator) {
+      for (TrueSheetView *view in views) {
         // A sheet still animating in counts too — dismissAnimated waits for it to land
         if (!view.viewController.isPresented && !view.viewController.isBeingPresented) {
           continue;
@@ -212,6 +256,18 @@ RCT_EXPORT_MODULE(TrueSheetModule)
 
   @synchronized(viewRegistry) {
     [viewRegistry setObject:view forKey:tag];
+  }
+}
+
++ (void)unregisterView:(TrueSheetView *)view withTag:(NSNumber *)tag {
+  if (!tag || !view) {
+    return;
+  }
+
+  @synchronized(viewRegistry) {
+    if ([viewRegistry objectForKey:tag] == view) {
+      [viewRegistry removeObjectForKey:tag];
+    }
   }
 }
 

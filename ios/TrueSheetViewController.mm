@@ -54,6 +54,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 - (void)correctHingeOffsetForIndex:(NSInteger)index;
 - (CGFloat)tabletopHingeEdge;
 - (CGFloat)hingeOffsetForHeight:(CGFloat)height;
+- (void)verifyDimmingAfterPresentation;
+- (void)removeFallbackDimView;
 - (void)animateInteractiveContainerToTransform:(CGAffineTransform)transform
                                       duration:(NSTimeInterval)duration
                           allowUserInteraction:(BOOL)allowUserInteraction
@@ -126,6 +128,14 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   TrueSheetDetentCalculator *_detentCalculator;
   TrueSheetDimView *_dimView;
 
+  // Stands in for a UIKit dim that failed to appear (see verifyDimmingAfterPresentation)
+  TrueSheetDimView *_fallbackDimView;
+  NSUInteger _dimmingRepairGeneration;
+
+  // Orphan teardown (see orphanedAfterUnmount)
+  id<UIViewControllerTransitionCoordinator> _orphanTransitionCoordinator;
+  BOOL _orphanDismissRequested;
+
   // Foldable hinge (iOS 27.1+). Tabletop resolves on demand from the window's
   // division region; these track the last applied posture to detect changes.
   BOOL _hingeStateKnown;
@@ -184,6 +194,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)dealloc {
+  [_fallbackDimView removeFromSuperview];
   [self restoreWindowAccessibilityElements];
   [_overlayDismissalTimer invalidate];
   [_transitionLink invalidate];
@@ -569,6 +580,169 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   }
 }
 
+#pragma mark - Dimming Self-Heal
+
+// UIKit can bring a sheet up without its dimming view when the present lands
+// right after another dismissal on the same presenter chain (reproducible on
+// iOS 26). After presenting and on detent changes, check the system dim exists
+// whenever the policy wants one. If it's missing, nudge the policy through a
+// real undimmed → configured transition, and only as a last resort show our own.
+// Custom dimming turns the system dim off and never takes this path.
+
+- (BOOL)expectsSystemDimming {
+  if (!self.dimmed || [self useCustomDimming]) {
+    return NO;
+  }
+
+  NSInteger currentIndex = self.currentDetentIndex;
+  if (currentIndex < 0) {
+    return NO;
+  }
+
+  NSInteger dimmedIndex = [self.dimmedDetentIndex integerValue];
+  if (dimmedIndex <= 0) {
+    return YES;
+  }
+
+  if (@available(iOS 16.0, *)) {
+    // Past the last detent nothing is dimmed (see configuredLargestUndimmedDetentIdentifier)
+    return dimmedIndex < (NSInteger)self.detents.count && currentIndex >= dimmedIndex;
+  }
+  return NO;
+}
+
+- (BOOL)isDimmingView:(UIView *)view visibleInContainer:(UIView *)container {
+  CGFloat alpha = 1;
+  for (UIView *cursor = view; cursor; cursor = cursor.superview) {
+    if (cursor.isHidden) {
+      return NO;
+    }
+    alpha *= cursor.alpha;
+    if (cursor == container) {
+      break;
+    }
+  }
+
+  CALayer *presentationLayer = view.layer.presentationLayer;
+  if (presentationLayer) {
+    alpha *= presentationLayer.opacity;
+  }
+
+  return alpha > 0.01 && view.window && !CGRectIsEmpty(view.bounds);
+}
+
+// UIKit's dimming view is private, so it's matched by class name (read-only).
+// It never lives inside the sheet itself, so the React subtree is skipped.
+- (BOOL)findSystemDimmingViewInView:(UIView *)view container:(UIView *)container {
+  if (view == _fallbackDimView || view == _dimView || view == self.presentedView) {
+    return NO;
+  }
+
+  NSString *className = NSStringFromClass([view class]);
+  if ([className rangeOfString:@"Dimming" options:NSCaseInsensitiveSearch].location != NSNotFound &&
+      [self isDimmingView:view visibleInContainer:container]) {
+    return YES;
+  }
+
+  for (UIView *subview in view.subviews) {
+    if ([self findSystemDimmingViewInView:subview container:container]) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+- (BOOL)hasVisibleSystemDimmingView {
+  UIView *container = self.sheet.containerView;
+  return container && [self findSystemDimmingViewInView:container container:container];
+}
+
+// A newer check, a dismissal, or a child stacked on top aborts a repair in flight
+- (BOOL)canRepairDimmingForGeneration:(NSUInteger)generation {
+  return generation == _dimmingRepairGeneration && !self.isBeingDismissed && self.viewIfLoaded.window &&
+         self.presentingViewController.presentedViewController == self && !self.presentedViewController;
+}
+
+- (void)verifyDimmingAfterPresentation {
+  NSUInteger generation = ++_dimmingRepairGeneration;
+
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (![self canRepairDimmingForGeneration:generation]) {
+      return;
+    }
+
+    if (![self expectsSystemDimming] || [self hasVisibleSystemDimmingView]) {
+      [self removeFallbackDimView];
+      return;
+    }
+
+    UISheetPresentationController *sheet = self.sheet;
+    UISheetPresentationControllerDetentIdentifier undimmedIdentifier =
+      UISheetPresentationControllerDetentIdentifierLarge;
+    if (@available(iOS 16.0, *)) {
+      undimmedIdentifier = sheet.detents.lastObject.identifier ?: undimmedIdentifier;
+    }
+
+    [sheet animateChanges:^{
+      sheet.largestUndimmedDetentIdentifier = undimmedIdentifier;
+    }];
+
+    // Two separate updates — within one, the toggle coalesces to a no-op
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (![self canRepairDimmingForGeneration:generation]) {
+        return;
+      }
+
+      [sheet animateChanges:^{
+        sheet.largestUndimmedDetentIdentifier = [self configuredLargestUndimmedDetentIdentifier];
+      }];
+
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (![self canRepairDimmingForGeneration:generation]) {
+          return;
+        }
+
+        if ([self hasVisibleSystemDimmingView]) {
+          [self removeFallbackDimView];
+        } else if ([self isDimmedAtEveryDetent]) {
+          // A detent-dependent fallback would need the position tracker to
+          // drive its alpha to match UIKit mid-drag
+          [self showFallbackDimView];
+        }
+      });
+    });
+  });
+}
+
+- (void)showFallbackDimView {
+  UIView *container = self.presentationController.containerView;
+  if (!container) {
+    return;
+  }
+
+  if (!_fallbackDimView) {
+    _fallbackDimView = [[TrueSheetDimView alloc] init];
+    _fallbackDimView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.2];
+    _fallbackDimView.accessibilityElementsHidden = YES;
+
+    __weak __typeof(self) weakSelf = self;
+    _fallbackDimView.onTap = ^{
+      [weakSelf handleDimViewTap];
+    };
+    [_fallbackDimView addToView:container];
+  }
+
+  [UIView animateWithDuration:0.2
+                   animations:^{
+                     self->_fallbackDimView.alpha = 1;
+                   }];
+}
+
+- (void)removeFallbackDimView {
+  [_fallbackDimView removeFromSuperview];
+  _fallbackDimView = nil;
+}
+
 - (void)viewWillAppear:(BOOL)animated {
   [super viewWillAppear:animated];
 
@@ -629,6 +803,8 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 
       // Apply a posture change that happened while presenting
       [self updateHingeState];
+
+      [self verifyDimmingAfterPresentation];
     });
 
     [self setupGestureRecognizer];
@@ -637,6 +813,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   }
 
   [self setupAccessibilityContainer];
+  [self attemptOrphanTeardown];
 }
 
 /**
@@ -680,7 +857,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 // Only the topmost sheet may refresh, or it would steal the window
 // accessibility override from the child presented over it.
 - (BOOL)canRefreshAccessibilityContainer {
-  return _isPresented && !self.isBeingDismissed && self.isTopmostPresentedController;
+  return _isPresented && !_orphanedAfterUnmount && !self.isBeingDismissed && self.isTopmostPresentedController;
 }
 
 - (void)refreshAccessibilityContainer {
@@ -894,6 +1071,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 
                                                                [timer invalidate];
                                                                [strongSelf refreshAccessibilityContainer];
+                                                               [strongSelf attemptOrphanTeardown];
                                                              }];
 }
 
@@ -909,6 +1087,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
                               if (self.presentedViewController == nil) {
                                 [self->_overlayDismissalTimer invalidate];
                                 [self refreshAccessibilityContainer];
+                                [self attemptOrphanTeardown];
                               }
                             }];
 }
@@ -939,6 +1118,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 
     [_dimView removeFromSuperview];
     _dimView = nil;
+    [self removeFallbackDimView];
 
     [_anchorView removeFromSuperview];
     _anchorView = nil;
@@ -946,6 +1126,9 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
     [_parentSheetController.delegate viewControllerDidFocus];
     [_parentSheetController setSheetAccessibilityElementsHidden:NO];
     [_parentSheetController setupAccessibilityContainer];
+    [_parentSheetController attemptOrphanTeardown];
+    // Dim repairs are skipped while a child sits on top
+    [_parentSheetController verifyDimmingAfterPresentation];
     _parentSheetController = nil;
 
     [self.delegate viewControllerDidBlur];
@@ -953,8 +1136,123 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   }
 }
 
+#pragma mark - Orphan Teardown
+
+- (void)setOrphanedAfterUnmount:(BOOL)orphanedAfterUnmount {
+  _orphanedAfterUnmount = orphanedAfterUnmount;
+  if (!orphanedAfterUnmount) {
+    _orphanTransitionCoordinator = nil;
+    _orphanDismissRequested = NO;
+  }
+}
+
+// Retries once the controller's transition ends. NO when it has none to wait on.
+- (BOOL)retryOrphanTeardownAfterTransitionOf:(nullable UIViewController *)controller {
+  id<UIViewControllerTransitionCoordinator> coordinator = controller.transitionCoordinator;
+  if (!coordinator) {
+    return NO;
+  }
+  if (coordinator == _orphanTransitionCoordinator) {
+    return YES;
+  }
+
+  __weak __typeof(self) weakSelf = self;
+  __weak id<UIViewControllerTransitionCoordinator> weakCoordinator = coordinator;
+  BOOL queued =
+    [coordinator animateAlongsideTransition:nil
+                                 completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                                   __typeof(self) strongSelf = weakSelf;
+                                   if (strongSelf && strongSelf->_orphanTransitionCoordinator == weakCoordinator) {
+                                     strongSelf->_orphanTransitionCoordinator = nil;
+                                   }
+                                   dispatch_async(dispatch_get_main_queue(), ^{
+                                     [weakSelf attemptOrphanTeardown];
+                                   });
+                                 }];
+  if (queued) {
+    _orphanTransitionCoordinator = coordinator;
+  }
+  return queued;
+}
+
+- (void)attemptOrphanTeardown {
+  if (!_orphanedAfterUnmount || _orphanDismissRequested) {
+    return;
+  }
+
+  UIViewController *presenter = self.presentingViewController;
+  if (!presenter) {
+    self.orphanedAfterUnmount = NO;
+    return;
+  }
+
+  // A dismissal issued mid-transition gets dropped — wait out ours, the
+  // presenter's, or a stacked child's
+  UIViewController *child = self.presentedViewController;
+  if ([self retryOrphanTeardownAfterTransitionOf:self] || [self retryOrphanTeardownAfterTransitionOf:presenter] ||
+      [self retryOrphanTeardownAfterTransitionOf:child]) {
+    return;
+  }
+
+  // A live child at rest keeps the orphan until it leaves — its didDismiss, the
+  // dismiss override, or the overlay poll retries then
+  if (child) {
+    return;
+  }
+
+  __weak __typeof(self) weakSelf = self;
+  if (self.isBeingPresented || self.isBeingDismissed || presenter.isBeingPresented || presenter.isBeingDismissed) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf attemptOrphanTeardown];
+    });
+    return;
+  }
+
+  if (presenter.presentedViewController != self) {
+    self.orphanedAfterUnmount = NO;
+    return;
+  }
+
+  _orphanDismissRequested = YES;
+  [presenter dismissViewControllerAnimated:NO
+                                completion:^{
+                                  __typeof(self) strongSelf = weakSelf;
+                                  if (strongSelf) {
+                                    strongSelf->_orphanDismissRequested = NO;
+                                    [strongSelf attemptOrphanTeardown];
+                                  }
+                                }];
+
+  // UIKit drops a dismissal it can't start without calling the completion
+  dispatch_async(dispatch_get_main_queue(), ^{
+    __typeof(self) strongSelf = weakSelf;
+    if (strongSelf && strongSelf->_orphanDismissRequested) {
+      strongSelf->_orphanDismissRequested = NO;
+      [strongSelf attemptOrphanTeardown];
+    }
+  });
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
   [super viewWillDisappear:animated];
+
+  // Captured now — presentingViewController is severed once the transition ends.
+  // Walks through dismissing parent sheets to the outermost presenter, so a whole
+  // stack survives an outer modal closing while a parent sheet's own dismiss()
+  // still closes its stack. A drag is the user closing the sheet itself.
+  if (self.isBeingDismissed && !_isDragging) {
+    UIViewController *presenter = self.presentingViewController;
+    while ([presenter isKindOfClass:[TrueSheetViewController class]] && presenter.isBeingDismissed) {
+      presenter = presenter.presentingViewController;
+    }
+    if (presenter.isBeingDismissed && ![presenter isKindOfClass:[TrueSheetViewController class]]) {
+      _dismissedWithPresenter = YES;
+    }
+  }
+
+  // Abort a dim repair in flight
+  _dimmingRepairGeneration++;
+
   [self restoreWindowAccessibilityElements];
   [self setSheetAccessibilityElementsHidden:YES];
 
@@ -964,7 +1262,16 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
     [UIView animateWithDuration:self.transitionCoordinator.transitionDuration
                      animations:^{
                        self->_dimView.alpha = 0;
+                       self->_fallbackDimView.alpha = 0;
                      }];
+  } else if (self.isBeingDismissed && _fallbackDimView) {
+    // Unlike the custom dim, the fallback doesn't follow the position tracker
+    TrueSheetDimView *fallbackDimView = _fallbackDimView;
+    [self.transitionCoordinator
+      animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        fallbackDimView.alpha = 0;
+      }
+                      completion:nil];
   }
 
   // A swipe can still be cancelled, so emit once it commits on release. Any
@@ -1116,6 +1423,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
       [self.delegate viewControllerDidChangeDetent:pendingIndex position:self.currentPosition detent:detent];
       [self->_grabberView updateAccessibilityValueWithIndex:pendingIndex detentCount:self->_detents.count];
       [self settleAtDetentIndex:pendingIndex debug:@"pending detent change"];
+      [self verifyDimmingAfterPresentation];
     });
   }
 }
@@ -1270,6 +1578,9 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
             [strongSelf settleAtDetentIndex:strongSelf.currentDetentIndex debug:@"transition end"];
           }
         });
+
+        // A cancelled dismiss may have faded the fallback dim out
+        [strongSelf verifyDimmingAfterPresentation];
       }
     }];
 }
@@ -1711,27 +2022,34 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 #endif
 
   sheet.detents = detents;
+  sheet.largestUndimmedDetentIdentifier = [self configuredLargestUndimmedDetentIdentifier];
+}
+
+// Shared with the dimming self-heal, which restores exactly this policy.
+- (nullable UISheetPresentationControllerDetentIdentifier)configuredLargestUndimmedDetentIdentifier {
+  UISheetPresentationController *sheet = self.sheet;
 
   if ([self useCustomDimming]) {
-    sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
-  } else if ([self isDimmedAtEveryDetent]) {
-    sheet.largestUndimmedDetentIdentifier = nil;
-  } else {
-    sheet.largestUndimmedDetentIdentifier = UISheetPresentationControllerDetentIdentifierLarge;
+    return sheet.detents.lastObject.identifier;
+  }
 
-    if (@available(iOS 16.0, *)) {
-      if (self.dimmed && self.dimmedDetentIndex) {
-        NSInteger dimmedIdx = [self.dimmedDetentIndex integerValue];
-        if (dimmedIdx > 0 && dimmedIdx - 1 < sheet.detents.count) {
-          sheet.largestUndimmedDetentIdentifier = sheet.detents[dimmedIdx - 1].identifier;
-        } else if (sheet.detents.lastObject) {
-          sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
-        }
-      } else if (sheet.detents.lastObject) {
-        sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
+  if ([self isDimmedAtEveryDetent]) {
+    return nil;
+  }
+
+  if (@available(iOS 16.0, *)) {
+    if (self.dimmed && self.dimmedDetentIndex) {
+      NSInteger dimmedIdx = [self.dimmedDetentIndex integerValue];
+      if (dimmedIdx > 0 && dimmedIdx - 1 < sheet.detents.count) {
+        return sheet.detents[dimmedIdx - 1].identifier;
       }
     }
+    if (sheet.detents.lastObject) {
+      return sheet.detents.lastObject.identifier;
+    }
   }
+
+  return UISheetPresentationControllerDetentIdentifierLarge;
 }
 
 - (UISheetPresentationControllerDetent *)detentForValue:(id)detent atIndex:(NSInteger)index {
@@ -2197,6 +2515,10 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   if (_isPresented) {
     [self setupDimView];
     _dimView.alpha = [self dimAlphaForIndex:self.currentDetentIndex];
+
+    if (![self expectsSystemDimming]) {
+      [self removeFallbackDimView];
+    }
   }
 }
 
@@ -2251,6 +2573,9 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
       CGFloat detent = [self detentValueForIndex:index];
       [self.delegate viewControllerDidChangeDetent:index position:self.currentPosition detent:detent];
     }
+
+    // Crossing dimmedDetentIndex changes whether a dim is expected
+    [self verifyDimmingAfterPresentation];
   });
 }
 
