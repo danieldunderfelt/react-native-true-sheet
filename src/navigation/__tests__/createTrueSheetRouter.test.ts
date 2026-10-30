@@ -347,6 +347,60 @@ describe('createTrueSheetRouter', () => {
       expect(nextState?.index).toBe(0);
     });
 
+    describe('a REPLACE of the top sheet', () => {
+      it('dismisses the sheet before the replacement mounts', () => {
+        const state = makeState([makeRoute('Home'), makeRoute('Details')]);
+        const replacing = getStateForAction(state, StackActions.replace('Settings', { id: 1 }))!;
+
+        expect(replacing.routes.map((r) => r.name)).toEqual(['Home', 'Details']);
+        expect(replacing.index).toBe(1);
+        expect(replacing.routes[1]).toMatchObject({
+          closing: true,
+          pendingReplace: { name: 'Settings', params: { id: 1 } },
+        });
+
+        const nextState = getStateForAction(replacing, {
+          ...TrueSheetActions.remove(),
+          source: 'Details-test',
+        });
+
+        expect(nextState?.routes.map((r) => r.name)).toEqual(['Home', 'Settings']);
+        expect(nextState?.routes[1]?.key).toBe(replacing.routes[1]?.pendingReplace?.key);
+        expect(nextState?.index).toBe(1);
+      });
+
+      it('keeps a route pushed during the dismiss above the replacement', () => {
+        const state = makeState([makeRoute('Home'), makeRoute('Details')]);
+        const replacing = getStateForAction(state, TrueSheetActions.replace('Settings'))!;
+        const pushed = getStateForAction(replacing, TrueSheetActions.push('Profile'))!;
+        const nextState = getStateForAction(pushed, {
+          ...TrueSheetActions.remove(),
+          source: 'Details-test',
+        });
+
+        expect(nextState?.routes.map((r) => r.name)).toEqual(['Home', 'Settings', 'Profile']);
+        expect(nextState?.index).toBe(2);
+      });
+
+      it('swaps a route below the top sheet in place', () => {
+        const state = makeState([makeRoute('Home'), makeRoute('Details'), makeRoute('Settings')]);
+        const nextState = getStateForAction(state, {
+          ...StackActions.replace('Profile'),
+          source: 'Details-test',
+          target: state.key,
+        });
+
+        expect(nextState?.routes.map((r) => r.name)).toEqual(['Home', 'Profile', 'Settings']);
+        expect(nextState?.routes.some((r) => r.closing)).toBe(false);
+      });
+
+      it('returns null for an unknown route', () => {
+        const state = makeState([makeRoute('Home'), makeRoute('Details')]);
+
+        expect(getStateForAction(state, StackActions.replace('Unknown'))).toBeNull();
+      });
+    });
+
     it('REMOVE returns the state unchanged when no route matches', () => {
       const state = makeState([makeRoute('Home'), makeRoute('Details')]);
       const nextState = getStateForAction(state, TrueSheetActions.remove());

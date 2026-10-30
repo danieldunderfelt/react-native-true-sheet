@@ -98,6 +98,8 @@ export type TrueSheetStateOf<State extends { routes: readonly unknown[] }> = Omi
     closing?: boolean;
     // Stacked above a `closing` route and dismissed natively with it
     dismissing?: boolean;
+    // Takes the `closing` route's place once it has dismissed (a sheet `REPLACE`)
+    pendingReplace?: State['routes'][number];
   })[];
 };
 

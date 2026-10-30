@@ -2,6 +2,7 @@ import { TrueSheetActions, type TrueSheetActionType } from '../actions';
 import {
   getResizeRouteIndex,
   getStateForNavigateToBase,
+  getStateForReplaceSheet,
   getTrueSheetStateForAction,
 } from '../createTrueSheetRouter';
 import type { StackRouterFactory, TrueSheetRouterFactory, TrueSheetRouterState } from './types';
@@ -80,7 +81,14 @@ export const extendTrueSheetRouter = (
           const result = getTrueSheetStateForAction(state, action);
 
           if (result === undefined) {
-            return baseRouter.getStateForAction(state, action, config);
+            const next = baseRouter.getStateForAction(state, action, config);
+            const swapped =
+              next === unhandled ? undefined : getStateForReplaceSheet(state, action, next.state);
+
+            // The replacement isn't in the routes until the replaced sheet dismisses
+            return swapped
+              ? { state: swapped, affectedRouteKey: swapped.routes[swapped.index]?.key }
+              : next;
           }
 
           if (result === null) {

@@ -273,6 +273,30 @@ describe('extendTrueSheetRouter', () => {
     });
   });
 
+  it('REPLACE of the top sheet dismisses it before the replacement mounts', () => {
+    const { baseRouter, extension } = createExtension('Home');
+    const state = makeState(['Home', 'Details']);
+    const replacement: Route = { key: 'Settings-new', name: 'Settings' };
+    baseRouter.getStateForAction.mockReturnValueOnce({
+      state: { ...state, routes: [state.routes[0]!, replacement] },
+      affectedRouteKey: replacement.key,
+    } as never);
+
+    const result = extension.getStateForAction(state, TrueSheetActions.replace('Settings'), {});
+
+    expect(result?.affectedRouteKey).toBe('Details-test');
+    expect(result?.state.routes[1]).toMatchObject({ closing: true, pendingReplace: replacement });
+
+    const removed = extension.getStateForAction(
+      result!.state,
+      { ...TrueSheetActions.remove(), source: 'Details-test' },
+      {}
+    );
+
+    expect(removed?.affectedRouteKey).toBe('Settings-new');
+    expect(removed?.state.routes.map((r) => r.key)).toEqual(['Home-test', 'Settings-new']);
+  });
+
   it('REMOVE reports the focused route as affected', () => {
     const { extension } = createExtension('Home');
     const result = extension.getStateForAction(

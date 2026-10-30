@@ -41,6 +41,7 @@ type SheetRoute = {
   name: string;
   closing?: boolean;
   dismissing?: boolean;
+  pendingReplace?: SheetRoute;
   resizeIndex?: number;
   resizeKey?: number;
 };
@@ -170,6 +171,11 @@ export const getTrueSheetStateForAction = <State extends SheetState>(
         (route, i) => i < routeIndex || (i > routeIndex && isPopped && !route.dismissing)
       );
 
+      // A replaced sheet hands its slot to the replacement once it has dismissed
+      if (removed.pendingReplace) {
+        routes.splice(routeIndex, 0, removed.pendingReplace as State['routes'][number]);
+      }
+
       return {
         ...state,
         index: Math.min(state.index, routes.length - 1),
@@ -180,6 +186,43 @@ export const getTrueSheetStateForAction = <State extends SheetState>(
     default:
       return undefined;
   }
+};
+
+/**
+ * Defers a `REPLACE` of the top sheet until it has dismissed: the sheet is marked closing with
+ * the replacement attached, and the `REMOVE` its dismissal dispatches splices the replacement in.
+ * Swapping both routes in one commit unmounts one native sheet while the next mounts, which
+ * glitches natively. `replaced` is the base router's state for the action, so the replacement
+ * gets the base router's key and params. Returns `undefined` when the action isn't a sheet
+ * `REPLACE` (the base route, or a route below the top sheet).
+ */
+export const getStateForReplaceSheet = <State extends SheetState>(
+  state: State,
+  action: { type: string },
+  replaced: State
+): State | undefined => {
+  const topIndex = state.routes.length - 1;
+  const top = state.routes[topIndex];
+  const replacement = replaced.routes[topIndex];
+
+  if (
+    action.type !== 'REPLACE' ||
+    topIndex < 1 ||
+    !top ||
+    top.closing ||
+    top.dismissing ||
+    !replacement ||
+    replacement.key === top.key
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...state,
+    routes: state.routes.map((route, i) =>
+      i === topIndex ? { ...route, closing: true, pendingReplace: replacement } : route
+    ),
+  };
 };
 
 const BASE_ROUTE_ACTIONS = new Set([
@@ -269,7 +312,15 @@ export const createTrueSheetRouter =
               baseRouter.getStateForAction(state, popAction, options) as TrueSheetRouterState | null
           ) ?? getTrueSheetStateForAction(state, action);
 
-        return result === undefined ? baseRouter.getStateForAction(state, action, options) : result;
+        if (result !== undefined) {
+          return result;
+        }
+
+        const next = baseRouter.getStateForAction(state, action, options);
+        // REPLACE never returns a partial state
+        return (
+          (next && getStateForReplaceSheet(state, action, next as TrueSheetRouterState)) ?? next
+        );
       },
 
       getRehydratedState(partialState, { routeNames, routeParamList, routeGetIdList }) {
