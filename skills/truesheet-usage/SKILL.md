@@ -399,10 +399,11 @@ For the full event list (drag events, focus/blur events, will/did lifecycle pair
 - `TrueSheet.dismissStack(name, animated?)`
 - `TrueSheet.resize(name, index)`
 - `TrueSheet.dismissAll(animated?)`
+- `TrueSheet.suspendAll()` / `TrueSheet.unsuspendAll()`
 
 **Web hook:**
 ```tsx
-const { present, dismiss, dismissStack, resize, dismissAll } = useTrueSheet()
+const { present, dismiss, dismissStack, resize, dismissAll, suspendAll, unsuspendAll } = useTrueSheet()
 ```
 
 ## Stacking Sheets

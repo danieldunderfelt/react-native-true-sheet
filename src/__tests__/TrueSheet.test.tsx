@@ -92,6 +92,14 @@ describe('TrueSheet', () => {
     expect(typeof TrueSheet.dismissAll).toBe('function');
   });
 
+  it('should delegate suspendAll and unsuspendAll to the native module', async () => {
+    await TrueSheet.suspendAll();
+    expect(TrueSheetModule?.suspendAll).toHaveBeenCalled();
+
+    await TrueSheet.unsuspendAll();
+    expect(TrueSheetModule?.unsuspendAll).toHaveBeenCalled();
+  });
+
   it('should render TrueSheet component without crashing', () => {
     const { getByText } = render(
       <TrueSheet name="test" initialDetentIndex={0}>
@@ -734,6 +742,134 @@ describe('TrueSheet', () => {
       sheetRef['isSheetVisible'] = true;
 
       expect(sheetRef['handleBackPress']()).toBe(false);
+    });
+  });
+
+  describe('Re-entrancy', () => {
+    it('should keep the native view mounted when presented from onDidDismiss', async () => {
+      const sheetRef = createRef<TrueSheet>();
+      const { getByText } = render(
+        <TrueSheet
+          ref={sheetRef}
+          name="reentrant-dismiss-test"
+          initialDetentIndex={0}
+          onDidDismiss={() => {
+            sheetRef.current?.present();
+          }}
+        >
+          <Text>Reentrant Content</Text>
+        </TrueSheet>
+      );
+
+      await act(async () => {
+        sheetRef.current!['onDidDismiss']({} as DidDismissEvent);
+      });
+
+      expect(getByText('Reentrant Content')).toBeDefined();
+    });
+
+    it('should reset isPresenting after a failed native present', async () => {
+      jest
+        .mocked(TrueSheetModule!.presentByRef)
+        .mockRejectedValueOnce(new Error('native present failed'));
+      const sheetRef = createRef<TrueSheet>();
+      const { queryByText } = render(
+        <TrueSheet ref={sheetRef} name="failed-present-test" initialDetentIndex={0}>
+          <Text>Failed Content</Text>
+        </TrueSheet>
+      );
+
+      await act(async () => {
+        await expect(sheetRef.current!.present()).rejects.toThrow('native present failed');
+      });
+
+      expect(sheetRef.current!['isPresenting']).toBe(false);
+
+      await act(async () => {
+        sheetRef.current!['onDidDismiss']({} as DidDismissEvent);
+      });
+
+      expect(queryByText('Failed Content')).toBeNull();
+    });
+
+    it('should reject a native present that never settles', async () => {
+      jest.useFakeTimers();
+      jest.mocked(TrueSheetModule!.presentByRef).mockReturnValueOnce(new Promise(() => {}));
+      const sheetRef = createRef<TrueSheet>();
+      render(
+        <TrueSheet ref={sheetRef} name="hung-present-test" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const presenting = sheetRef.current!.present();
+      jest.advanceTimersByTime(6000);
+
+      await expect(presenting).rejects.toThrow('TrueSheet: present timed out');
+      expect(sheetRef.current!['isPresenting']).toBe(false);
+      jest.useRealTimers();
+    });
+
+    it('should ignore present, resize, and dismiss once unmounted', async () => {
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      jest.mocked(TrueSheetModule!.presentByRef).mockClear();
+      jest.mocked(TrueSheetModule!.resizeByRef).mockClear();
+      jest.mocked(TrueSheetModule!.dismissByRef).mockClear();
+      const sheetRef = createRef<TrueSheet>();
+      const { unmount } = render(
+        <TrueSheet ref={sheetRef} name="unmounted-test" initialDetentIndex={0}>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+      const sheet = sheetRef.current!;
+
+      unmount();
+
+      await expect(sheet.present()).resolves.toBeUndefined();
+      await expect(sheet.resize(0)).resolves.toBeUndefined();
+      await expect(sheet.dismiss()).resolves.toBeUndefined();
+      expect(TrueSheetModule?.presentByRef).not.toHaveBeenCalled();
+      expect(TrueSheetModule?.resizeByRef).not.toHaveBeenCalled();
+      expect(TrueSheetModule?.dismissByRef).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+  });
+
+  describe('Suspended', () => {
+    it('should pass suspended to the native view and keep the content mounted', () => {
+      const props = { testID: 'suspended-test', name: 'suspended-test', initialDetentIndex: 0 };
+      const { getByTestId, getByText, rerender } = render(
+        <TrueSheet {...props}>
+          <Text>Suspended Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByTestId('suspended-test').props.suspended).toBe(false);
+
+      rerender(
+        <TrueSheet {...props} suspended>
+          <Text>Suspended Content</Text>
+        </TrueSheet>
+      );
+
+      expect(getByTestId('suspended-test').props.suspended).toBe(true);
+      expect(getByText('Suspended Content')).toBeDefined();
+    });
+
+    it('should let a back press through while suspended', () => {
+      jest.mocked(TrueSheetModule!.handleBackPress).mockClear();
+      render(
+        <TrueSheet name="suspended-back-press-test" initialDetentIndex={0} suspended>
+          <Text>Content</Text>
+        </TrueSheet>
+      );
+
+      const sheetRef = TrueSheet['instances']['suspended-back-press-test']!;
+      sheetRef['isPresented'] = true;
+      sheetRef['isSheetVisible'] = true;
+
+      expect(sheetRef['handleBackPress']()).toBe(false);
+      expect(TrueSheetModule?.handleBackPress).not.toHaveBeenCalled();
     });
   });
 

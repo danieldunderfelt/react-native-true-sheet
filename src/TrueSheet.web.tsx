@@ -1472,3 +1472,5 @@ TrueSheet.dismiss = rejectStatic;
 TrueSheet.dismissStack = rejectStatic;
 TrueSheet.resize = rejectStatic;
 TrueSheet.dismissAll = rejectStatic;
+TrueSheet.suspendAll = rejectStatic;
+TrueSheet.unsuspendAll = rejectStatic;

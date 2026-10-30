@@ -348,6 +348,18 @@ Used with `initialDetentIndex`.
 | - | - | - | - | - |
 | `boolean` | `true` | ✅ | ✅ | ✅ |
 
+## `suspended`
+
+While `true`, the sheet steps aside natively — dismissed on iOS, hidden on Android — **without reporting a close**. It stays logically presented, keeps its mounted content and remembered detent, and returns at that detent when set back to `false`. No `onWillDismiss`/`onDidDismiss` (on suspend) or `onWillPresent`/`onDidPresent` (on resume) fire; the blur and focus events do.
+
+Use it to let a full-screen native `Modal` present over an open sheet — on iOS the two share a presenter, so the sheet must step aside first — then bring the sheet back when the modal is gone. Flip it back to `false` from the modal's dismiss callback for a race-free return.
+
+Calling [`dismiss()`](methods#dismiss) or [`dismissAll()`](methods#dismissall) while suspended performs a real close; the sheet won't return on resume.
+
+| Type | Default | 🍎 | 🤖 | 🌐 |
+| - | - | - | - | - |
+| `boolean` | `false` | ✅ | ✅ | ❌ |
+
 ## `lazy`
 
 Specify whether the sheet content should mount lazily, on first presentation. Set to `false` to mount the content before presentation without presenting the sheet. Use this when content is not ready on the first render, then call [`present()`](methods#present) after your readiness signal so [`auto`](types#sheetdetent) detents measure the settled content.

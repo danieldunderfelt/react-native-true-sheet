@@ -134,6 +134,7 @@ export interface NativeProps extends ViewProps {
   draggable?: CodegenTypes.WithDefault<boolean, true>;
   dimmed?: CodegenTypes.WithDefault<boolean, true>;
   initialDetentAnimated?: CodegenTypes.WithDefault<boolean, true>;
+  suspended?: CodegenTypes.WithDefault<boolean, false>;
   // React tag of the scrollable component within the content (see scrollableRef)
   scrollableHandle?: CodegenTypes.WithDefault<CodegenTypes.Int32, -1>;
   scrollableOptions?: ScrollableOptionsType;

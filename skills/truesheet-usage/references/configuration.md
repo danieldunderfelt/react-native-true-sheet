@@ -240,6 +240,7 @@ Like any scroll view, a plugged scrollable needs a bounded height for fixed dete
 |------|------|---------|-----------|-------------|
 | `initialDetentIndex` | `number` | `-1` | 🍎🤖🌐 | Auto-present at this detent on mount. `-1` means don't auto-present |
 | `initialDetentAnimated` | `boolean` | `true` | 🍎🤖🌐 | Animate the initial presentation |
+| `suspended` | `boolean` | `false` | 🍎🤖 | Step aside natively (dismissed on iOS, hidden on Android) without a close: no dismiss/present events, content and detent kept, returns when set back to `false`. Use it to present a full-screen native `Modal` over an open sheet. `dismiss()` while suspended is a real close |
 | `lazy` | `boolean` | `true` | 🍎🤖 | Mount content on first presentation. Set to `false` to mount content immediately without presenting, so `'auto'` detents measure settled content — call `present()` after your readiness signal. Content stays mounted after dismiss. SwiftUI-hosted views still only measure during presentation |
 
 ## Web-specific
