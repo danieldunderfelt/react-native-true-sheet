@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 4.1.1
+
 ### 🐛 Bug fixes
 
 - **iOS**: `animatedIndex` and `onPositionChange` now report the exact detent index once the sheet settles, instead of holding a fraction left by an offset learned mid-animation. Quick `resize()` calls or grabber taps no longer pull the sheet back to an earlier detent or report a stale `onDetentChange`. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
