@@ -2,10 +2,23 @@
 
 ## Unreleased
 
+### 🎉 New features
+
+- **iOS**, **Android**: New `suspended` prop steps a presented sheet aside natively — dismissed on iOS, hidden on Android — without reporting a close. The sheet stays logically presented, keeps its content and detent, and returns when unset, so a full-screen native `Modal` can present over it. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- New `TrueSheet.suspendAll()` and `TrueSheet.unsuspendAll()` suspend every sheet open at call time and bring them back at their remembered detents without present events. Sheets presented in between are unaffected, and both compose with the `suspended` prop. No-ops on web. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+
 ### 🐛 Bug fixes
 
+- **iOS**: A sheet presented over a modal that closes underneath it (a React Navigation modal route or RN `Modal`) now comes back once the modal is gone, without dismiss events. An explicit `dismiss()` during the teardown still closes it. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- **iOS**: `present()` while the sheet itself, or anything else on its presenter, is still animating out now waits and presents instead of resolving without presenting, and a sheet never presents before its content mounts. A transition that never settles rejects with `PRESENT_TIMEOUT`. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- **iOS**: Unmounting or recycling a presented sheet now dismisses only that sheet, without animation, instead of the whole presentation chain, and a recycled sheet no longer inherits its previous controller. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- **iOS**: `present()` right after a recycled sheet mounts no longer rejects with `SHEET_NOT_FOUND`, `present()` on a sheet whose screen is covered by a full-screen modal falls back to the key window, and dismissing a sheet that's already gone resolves. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- **iOS**: The backdrop no longer goes missing when a sheet presents right after another modal dismisses. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
 - **iOS**: `present()` on a sheet that isn't in a window, such as on a screen that just regained focus but isn't back on screen yet, now logs a warning instead of only rejecting. Present it once the screen is visible, or use `initialDetentIndex`. ([#990](https://github.com/lodev09/react-native-true-sheet/pull/990) by [@lodev09](https://github.com/lodev09))
 - **iOS**: Closing an image picker presented over a sheet no longer leaves the sheet's content hidden from VoiceOver and UI tests. ([#994](https://github.com/lodev09/react-native-true-sheet/pull/994) by [@erickreutz](https://github.com/erickreutz))
+- **Android**: `present()` during the dismiss animation now presents after the dismissal instead of resolving without presenting, a child sheet no longer moves its dismissing parent, and dismissing a sheet that's already gone resolves. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- `navigation.replace()` between sheet screens now dismisses the old sheet before the new one mounts, with React Navigation and Expo Router. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+- `present()` from `onDidDismiss` keeps the content mounted, a rejected or stuck native `present()` no longer blocks the next dismiss from unmounting the content, and `present()`, `resize()`, and `dismiss()` on an unmounted sheet are no-ops. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
 
 ### 💡 Others
 
