@@ -45,6 +45,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 - (UIViewController *)accessibilityPresentingViewController;
 - (void)setupTransitionTracker;
 - (void)settleAtDetentIndex:(NSInteger)index debug:(NSString *)debug;
+- (void)settleWhenIdleWithDebug:(NSString *)debug;
 - (void)restoreWindowAccessibilityElements;
 - (void)setSheetAccessibilityElementsHidden:(BOOL)hidden;
 - (void)setAccessibilityContentElement:(UIView *)contentView;
@@ -86,6 +87,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   CGFloat _autoDetentHeight;
   CGFloat _peekDetentHeight;
   NSInteger _pendingDetentIndex;
+  NSUInteger _pendingDetentGeneration;
+  NSUInteger _settleGeneration;
   NSInteger _displayedBackgroundIndex;
   BOOL _usesBackgroundEffects;
   BOOL _refusedPanDismiss;
@@ -1322,11 +1325,21 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 
   // Mid-drag the frame tracks the finger — never settle or learn from it;
   // pending changes keep their flags and settle on the first post-drag layout.
-  if ((_pendingContentSizeChange || _pendingDetentsChange) && !_isDragging) {
+  // A change landing mid-snap settles once the snap ends, since the frame
+  // UIKit lays out first isn't always the resting one.
+  BOOL settlePending = (_pendingContentSizeChange || _pendingDetentsChange) && !_isDragging;
+  if (settlePending) {
     _pendingContentSizeChange = NO;
     _pendingDetentsChange = NO;
+  }
+
+  if (settlePending && !self.isPresentedViewAnimating) {
     [self settleAtDetentIndex:self.currentDetentIndex debug:@"layout"];
   } else {
+    if (settlePending) {
+      [self settleWhenIdleWithDebug:@"layout"];
+    }
+
     // A child on top moves this sheet two ways: an animated collapse/restore
     // step (presenting/dismissing) — emit the target non-realtime so JS
     // animates to it — or direct per-frame re-layouts while the child drags,
@@ -1413,16 +1426,23 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   [self updateHingeState];
 
   if (_pendingDetentIndex >= 0) {
-    NSInteger pendingIndex = _pendingDetentIndex;
     _pendingDetentIndex = -1;
+    NSUInteger generation = _pendingDetentGeneration;
 
-    // The presentedView frame isn't final until UIKit finishes the resize
-    // animation — no completion hook exists for it, hence the delay.
+    // No completion hook exists for the resize animation, hence the delay.
+    // A newer resize owns the report, and UIKit's selection is reported rather
+    // than the requested index — a stale one would also become the active
+    // detent and pull the sheet back on the next detents update.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-      CGFloat detent = [self detentValueForIndex:pendingIndex];
-      [self.delegate viewControllerDidChangeDetent:pendingIndex position:self.currentPosition detent:detent];
-      [self->_grabberView updateAccessibilityValueWithIndex:pendingIndex detentCount:self->_detents.count];
-      [self settleAtDetentIndex:pendingIndex debug:@"pending detent change"];
+      NSInteger index = self.currentDetentIndex;
+      if (generation != self->_pendingDetentGeneration || index < 0) {
+        return;
+      }
+
+      CGFloat detent = [self detentValueForIndex:index];
+      [self.delegate viewControllerDidChangeDetent:index position:self.currentPosition detent:detent];
+      [self->_grabberView updateAccessibilityValueWithIndex:index detentCount:self->_detents.count];
+      [self settleWhenIdleWithDebug:@"pending detent change"];
       [self verifyDimmingAfterPresentation];
     });
   }
@@ -1499,12 +1519,14 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
     case UIGestureRecognizerStateEnded:
     case UIGestureRecognizerStateCancelled: {
       if (!_isTransitioning) {
-        // Dispatch so UIKit picks the target detent first; the settle emit is
-        // non-realtime and JS animates alongside UIKit's snap spring.
+        // Dispatch so UIKit picks the target detent first. Emit the target
+        // non-realtime so JS animates alongside UIKit's snap spring, then learn
+        // once the snap has landed.
         dispatch_async(dispatch_get_main_queue(), ^{
           NSInteger endIndex = self.currentDetentIndex;
           [self->_grabberView updateAccessibilityValueWithIndex:endIndex detentCount:self->_detents.count];
-          [self settleAtDetentIndex:endIndex debug:@"drag end"];
+          [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:NO debug:@"drag end"];
+          [self settleWhenIdleWithDebug:@"drag end"];
         });
       }
 
@@ -1575,7 +1597,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
       if (strongSelf->_isPresented && !strongSelf.isBeingDismissed) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
           if (!strongSelf->_isDragging) {
-            [strongSelf settleAtDetentIndex:strongSelf.currentDetentIndex debug:@"transition end"];
+            [strongSelf settleWhenIdleWithDebug:@"transition end"];
           }
         });
 
@@ -1615,6 +1637,36 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   }
 
   [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:NO debug:debug];
+}
+
+/**
+ * Settles once nothing moves the sheet, so the learned offset comes from its
+ * resting frame — the frame UIKit lays out first during a snap isn't always
+ * the final one (e.g. the floating-sheet inset at small detents). A newer
+ * request replaces a waiting one. A drag, transition or nav swipe settles on
+ * its own end; a lingering animation stops the wait after a bound.
+ */
+- (void)settleWhenIdleWithDebug:(NSString *)debug {
+  [self settleWhenIdleWithDebug:debug generation:++_settleGeneration attempt:0];
+}
+
+- (void)settleWhenIdleWithDebug:(NSString *)debug generation:(NSUInteger)generation attempt:(NSInteger)attempt {
+  static const NSInteger kMaxIdleSettleAttempts = 30;
+
+  if (generation != _settleGeneration || !_isPresented || self.isBeingDismissed || _isDragging || _isTransitioning ||
+      _isInteractiveDismiss) {
+    return;
+  }
+
+  if (self.isPresentedViewAnimating && attempt < kMaxIdleSettleAttempts) {
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      [weakSelf settleWhenIdleWithDebug:debug generation:generation attempt:attempt + 1];
+    });
+    return;
+  }
+
+  [self settleAtDetentIndex:self.currentDetentIndex debug:debug];
 }
 
 #pragma mark - Interactive Navigation Dismiss
@@ -1746,10 +1798,15 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
     }
   }
 
+  // At rest the sheet sits on its selected detent, so report that detent. The
+  // interpolated index goes through learned offsets and can land a fraction
+  // off, which JS would then hold until the next movement.
+  NSInteger restingIndex = [self restingDetentIndexForRealtime:realtime];
   TrueSheetPositionState state = {
     .position = position,
-    .detent = [self interpolatedDetentForPosition:position],
-    .index = [self interpolatedIndexForPosition:position],
+    .detent =
+      restingIndex >= 0 ? [self detentValueForIndex:restingIndex] : [self interpolatedDetentForPosition:position],
+    .index = restingIndex >= 0 ? restingIndex : [self interpolatedIndexForPosition:position],
   };
 
   // A child on top only pushes this sheet back, its detent stays.
@@ -1777,6 +1834,23 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   [_detentCalculator learnOffsetForDetentIndex:index];
 }
 
+/**
+ * The selected detent when the sheet rests on it, else -1. Settle emits always
+ * rest on it; realtime emits only when no drag, transition, nav swipe or
+ * animation moves the sheet. A keyboard-grown sheet rests above its detent.
+ */
+- (NSInteger)restingDetentIndexForRealtime:(BOOL)realtime {
+  if (_keyboardSheetGrown || _minimizedKeyboardOverlap > 0) {
+    return -1;
+  }
+
+  if (realtime && (_isDragging || _isTransitioning || _isInteractiveDismiss || self.isPresentedViewAnimating)) {
+    return -1;
+  }
+
+  return self.currentDetentIndex;
+}
+
 - (void)setKeyboardSheetGrown:(BOOL)keyboardSheetGrown {
   BOOL wasGrown = _keyboardSheetGrown;
   _keyboardSheetGrown = keyboardSheetGrown;
@@ -1785,7 +1859,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
   // has the sheet grown (e.g. a drag-end during the shrink-back) — re-settle
   // at the resting detent once the keyboard is fully away.
   if (wasGrown && !keyboardSheetGrown && self.isPresented && !_isDragging) {
-    [self settleAtDetentIndex:self.currentDetentIndex debug:@"keyboard settled"];
+    [self settleWhenIdleWithDebug:@"keyboard settled"];
   }
 }
 
@@ -2245,11 +2319,12 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 }
 
 - (void)resizeToDetentIndex:(NSInteger)index {
-  if (index == _activeDetentIndex) {
+  if (index == _activeDetentIndex && index == self.currentDetentIndex) {
     return;
   }
 
   _pendingDetentIndex = index;
+  _pendingDetentGeneration++;
   _activeDetentIndex = index;
   [self applyActiveDetent];
 }
@@ -2576,6 +2651,7 @@ static BOOL TrueSheetIsPhoneIdiom(void) {
 
     // Crossing dimmedDetentIndex changes whether a dim is expected
     [self verifyDimmingAfterPresentation];
+    [self settleWhenIdleWithDebug:@"detent change"];
   });
 }
 

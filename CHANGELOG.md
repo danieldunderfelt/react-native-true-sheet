@@ -9,6 +9,7 @@
 
 ### 🐛 Bug fixes
 
+- **iOS**: `animatedIndex` and `onPositionChange` now report the exact detent index once the sheet settles, instead of holding a fraction left by an offset learned mid-animation. Quick `resize()` calls or grabber taps no longer pull the sheet back to an earlier detent or report a stale `onDetentChange`. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
 - **iOS**: A sheet presented over a modal that closes underneath it (a React Navigation modal route or RN `Modal`) now comes back once the modal is gone, without dismiss events. An explicit `dismiss()` during the teardown still closes it. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
 - **iOS**: `present()` while the sheet itself, or anything else on its presenter, is still animating out now waits and presents instead of resolving without presenting, and a sheet never presents before its content mounts. A transition that never settles rejects with `PRESENT_TIMEOUT`. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
 - **iOS**: Unmounting or recycling a presented sheet now dismisses only that sheet, without animation, instead of the whole presentation chain, and a recycled sheet no longer inherits its previous controller. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
