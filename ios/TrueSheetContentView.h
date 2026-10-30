@@ -8,6 +8,7 @@
 
 #ifdef RCT_NEW_ARCH_ENABLED
 
+#import <React/RCTMountingTransactionObserving.h>
 #import <React/RCTSurfaceTouchHandler.h>
 #import <React/RCTViewComponentView.h>
 #import <UIKit/UIKit.h>
@@ -15,6 +16,7 @@
 #import "core/TrueSheetKeyboardObserver.h"
 
 @class TrueSheetViewController;
+@class TrueSheetFooterView;
 @class RCTScrollViewComponentView;
 @class ScrollableOptions;
 
@@ -24,31 +26,73 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)contentViewDidChangeSize:(CGSize)newSize;
 - (void)contentViewScrollViewDidChange;
+- (void)contentViewDidMountTransaction;
 
 @end
 
-@interface TrueSheetContentView : RCTViewComponentView <TrueSheetKeyboardObserverDelegate>
+@interface TrueSheetContentView
+    : RCTViewComponentView <TrueSheetKeyboardObserverDelegate, RCTMountingTransactionObserving>
 
 @property (nonatomic, weak, nullable) id<TrueSheetContentViewDelegate> delegate;
 @property (nonatomic, assign) CGFloat keyboardScrollOffset;
+
+/**
+ * Adjustment added to the keyboard bottom inset applied to the detected
+ * scrollable — negative values reduce the inset (e.g. to cancel out safe-area
+ * padding already baked into the content's paddingBottom).
+ */
+@property (nonatomic, assign) CGFloat keyboardOffset;
+
 @property (nonatomic, weak, nullable) TrueSheetKeyboardObserver *keyboardObserver;
+
+/**
+ * Sibling footer view — a relative footer shields part of the keyboard's
+ * overlap from the inset; an absolute footer extends the caret reveal target.
+ */
+@property (nonatomic, weak, nullable) TrueSheetFooterView *footerView;
+
+/**
+ * Content height measured unconstrained by the shadow node — the height the
+ * content wants regardless of container bounds (see
+ * TrueSheetContentViewShadowNode). Falls back to the frame height before the
+ * first state update.
+ */
+@property (nonatomic, readonly) CGFloat naturalHeight;
+
+/**
+ * React tag of the user-provided scrollable (see the `scrollableRef` prop).
+ * Setting a new handle clears the currently resolved ScrollView.
+ */
+@property (nonatomic, assign) NSInteger scrollableHandle;
+
+/**
+ * Sets the resolved ScrollView's `contentInsetAdjustmentBehavior` to
+ * `automatic` while plugged so UIKit applies the bottom safe-area inset to
+ * the scroll content. The previous behavior is restored on clear.
+ */
+@property (nonatomic, assign) BOOL safeAreaInsetAdjustment;
+
+/**
+ * Pads the resolved ScrollView's bottom content inset by the absolute
+ * footer's height so the last item scrolls into view above it. Stacks with
+ * the keyboard inset.
+ */
+@property (nonatomic, assign) BOOL footerInsetAdjustment;
 
 - (RCTScrollViewComponentView *_Nullable)findScrollView;
 
 /**
- * Setup scrollable content
- * @param enabled Whether scrollable is enabled
- * @param bottomInset Bottom content inset for the scroll view
+ * Re-applies the footer and keyboard insets — call when the footer's size changes
  */
-- (void)setupScrollable:(BOOL)enabled bottomInset:(CGFloat)bottomInset;
+- (void)updateBottomInset;
 
 /**
- * Update the pinned scroll view's height to fill the container
+ * Resolve the ScrollView from `scrollableHandle`, wiring keyboard handling
  */
-- (void)updateScrollViewHeight;
+- (void)setupScrollable;
 
 /**
- * Apply scroll edge effects to the pinned scroll view (iOS 26+)
+ * Apply scroll edge effects to the detected scroll view (iOS 26+)
  */
 - (void)applyScrollEdgeEffects:(nullable ScrollableOptions *)options;
 

@@ -1,0 +1,313 @@
+---
+title: Types
+description: True Native Bottom Sheet type reference.
+keywords: [bottom sheet types, bottom sheet typescript, bottom sheet definitions]
+---
+
+## `SheetDetent`
+
+```tsx
+<TrueSheet detents={['auto', 0.8, 1]}>
+  <View />
+</TrueSheet>
+```
+
+| Value | Description | 🍎 | 🤖 | 🌐 |
+| - | - | - | - | - |
+| `"auto"` | Auto resize based on content height. | **_16+_** | ✅ | ✅ |
+| `"peek"` | Collapsed height based on the combined [`header`](configuration#header) and absolute [`footer`](configuration#footer) heights, plus the content up to the bottom of a [`TrueSheetPeek`](../guides/peeking) component rendered within it. Falls back to a fixed height of `150` when none is provided. | **_16+_** | ✅ | ✅ |
+| `number` | Fractional height (0-1) representing percentage of screen height. | ✅ | ✅ | ✅ |
+
+:::info
+The `"auto"` detent derives the sheet height from the content's natural height. With scrolling content, it sizes to the scroll view's content height and resizes as content grows or shrinks. See [Scrolling Content](../guides/scrolling).
+:::
+
+## `DetentBackground`
+
+An entry in [`detentBackgrounds`](configuration#detentbackgrounds). A string is a color value.
+Object entries accept either color or blur, never both.
+
+```tsx
+export type DetentBackground =
+  | string
+  | { color: ColorValue; blur?: never }
+  | { blur: BackgroundBlur; color?: never };
+```
+
+`ColorValue` is a React Native color. [`BackgroundBlur`](#backgroundblur) selects an iOS blur style.
+Android and Web inherit the sheet background for blur entries.
+
+## `BackgroundBlur`
+
+Blur style that is mapped into native values in iOS.
+
+```tsx
+<TrueSheet backgroundBlur="dark">
+  <View />
+</TrueSheet>
+```
+
+| Value |
+| - |
+| `"light"` |
+| `"dark"` |
+| `"default"` |
+| `"extra-light"` |
+| `"regular"` |
+| `"prominent"` |
+| `"system-ultra-thin-material"` |
+| `"system-thin-material"` |
+| `"system-material"` |
+| `"system-thick-material"` |
+| `"system-chrome-material"` |
+| `"system-ultra-thin-material-light"` |
+| `"system-thin-material-light"` |
+| `"system-material-light"` |
+| `"system-thick-material-light"` |
+| `"system-chrome-material-light"` |
+| `"system-ultra-thin-material-dark"` |
+| `"system-thin-material-dark"` |
+| `"system-material-dark"` |
+| `"system-thick-material-dark"` |
+| `"system-chrome-material-dark"` |
+
+## `ScrollableOptions`
+
+Options for customizing scrollable behavior. Applies to the scrollable provided via [`scrollableRef`](configuration#scrollableref).
+
+```tsx
+<TrueSheet
+  scrollableRef={scrollableRef}
+  scrollableOptions={{
+    scrollingExpandsSheet: false,
+  }}
+>
+  <ScrollView ref={scrollableRef}>
+    <View />
+  </ScrollView>
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `contentInsetAdjustment` | [`ContentInsetAdjustment`](#contentinsetadjustment) | What the sheet insets the bottom of the scroll content for: the bottom safe-area inset while the content can scroll, and/or the height of an `absolute` [`footer`](configuration#footer) floating over it (which then counts toward the `auto` detent). See [Bottom Safe-Area Inset](../guides/scrolling#bottom-safe-area-inset) and [Footer Inset](../guides/scrolling#footer-inset). | `'automatic'` |
+| `scrollingExpandsSheet` | `boolean` | When `false`, scrolling the content does not expand the sheet to the next detent. Only dragging the grabber or sheet background expands it. Useful for YouTube-style comments sheets. | `true` |
+| `keyboardScrollOffset` | `number` | Additional offset when scrolling to a focused input above the keyboard. | `0` |
+| `keyboardOffset` | `number` | Adjusts the bottom inset applied to the scrollable when the keyboard is shown. Negative values reduce it — pass `-insets.bottom` to cancel out safe-area padding already included in the content's `paddingBottom`. | `0` |
+| `topScrollEdgeEffect` | [`ScrollEdgeEffect`](#scrolledgeeffect) | The scroll edge effect applied to the top edge of the scroll view and header. iOS 26+ only. | `'hidden'` |
+| `bottomScrollEdgeEffect` | [`ScrollEdgeEffect`](#scrolledgeeffect) | The scroll edge effect applied to the bottom edge of the scroll view and footer. iOS 26+ only. | `'hidden'` |
+
+## `HeaderOptions`
+
+Options for customizing header behavior.
+
+```tsx
+<TrueSheet
+  header={<Header />}
+  headerOptions={{
+    position: 'absolute',
+  }}
+>
+  {/* ... */}
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `position` | `'relative' \| 'absolute'` | How the header participates in the sheet layout. `'relative'` takes up space above the content and is included in the `auto` detent height. `'absolute'` floats over the content, pinned to the top edge, and is excluded from the `auto` detent height. | `'relative'` |
+
+## `FooterOptions`
+
+Options for customizing footer behavior.
+
+```tsx
+<TrueSheet
+  footer={<Footer />}
+  footerOptions={{
+    position: 'absolute',
+    keyboardOffset: -16,
+  }}
+>
+  {/* ... */}
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `position` | `'relative' \| 'absolute'` | How the footer participates in the sheet layout. `'relative'` takes up space below the content, pinned to the bottom edge — included in the `auto` detent height but excluded from the `peek` detent height (it's pushed off-screen at peek). `'absolute'` floats over the content, pinned to the bottom edge — excluded from the `auto` detent height but included in the `peek` detent height. | `'relative'` |
+| `keyboardOffset` | `number` | Adjusts how far an `absolute` footer rises when the keyboard opens. Positive values raise it higher; negative values tuck the footer's own bottom padding behind the keyboard instead of leaving a gap. The built-in safe-area inset is skipped automatically while the keyboard is open. A `relative` footer stays in the layout flow behind the keyboard, so this has no effect. | `0` |
+| `avoidKeyboard` | `boolean` | Whether an `absolute` footer rises above the keyboard. Set to `false` to keep it at the bottom edge of the sheet. With footer inset adjustment enabled, any footer portion above the keyboard still adds scroll padding and contributes to the expanded `auto` height. The pinned footer keeps its safe-area padding and ignores `keyboardOffset`. No effect on relative footers. Native only. | `true` |
+
+## `FoldOptions`
+
+Options for foldables. They apply while the device is half-open with a horizontal fold (tabletop). Requires iOS 27.1+.
+
+```tsx
+<TrueSheet
+  detents={['peek', 0.6, 1]}
+  foldOptions={{
+    hingeDetentIndex: 1,
+    hingeBehavior: 'snap',
+  }}
+>
+  {/* ... */}
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `hingeDetentIndex` | `number` | The detent that rests on the hinge in tabletop, so the sheet fills the panel below it. In any other posture the detent keeps its own value. Other detents keep their values, so the sheet can still expand past the hinge unless `hingeBehavior` keeps it below. Lower detents stay below it and higher ones above it, so the detents keep their order. | |
+| `hingeBehavior` | `'none' \| 'avoid' \| 'snap'` | How the sheet treats the hinge in tabletop. `'none'` lets detents cross it. `'avoid'` caps every detent at the hinge, so the sheet never crosses it. `'snap'` is like `'avoid'`, and also moves the sheet to `hingeDetentIndex` when the device enters tabletop, then back to its previous detent when it leaves, unless the sheet was moved off the hinge in between. Detents that reach above the hinge collapse onto it, so `'avoid'` works best with one detent above the hinge. | `'none'` |
+
+## `ContentInsetAdjustment`
+
+What the sheet insets the bottom of a plugged scrollable's content for. Set via [`ScrollableOptions`](#scrollableoptions).
+
+| Value | Description |
+| - | - |
+| `'automatic'` | The bottom safe-area inset while the content can scroll, plus the height of an `absolute` footer floating over the scroll view — the footer then counts toward the `auto` detent. This is the default. |
+| `'safe-area'` | The safe-area inset only — content scrolls under an absolute footer. |
+| `'footer'` | The absolute footer only — you pad for the safe area. |
+| `'never'` | No inset — you pad the content yourself. |
+
+The safe-area inset only applies while the sheet's [`insetAdjustment`](configuration#insetadjustment) is `'automatic'`; a relative footer absorbs it instead. The footer inset is independent of `insetAdjustment` — only the part of the footer overlapping the scroll view is applied, and it stacks with the keyboard inset. See [Scrolling Content](../guides/scrolling#bottom-safe-area-inset).
+
+## `ScrollEdgeEffect`
+
+Controls the blur/gradient edge effect on the scroll view edges and header/footer overlay views. iOS 26+ only.
+
+| Value | Description |
+| - | - |
+| `'automatic'` | System default edge effect style. |
+| `'hard'` | A hard, opaque edge effect. |
+| `'soft'` | A soft, gradient edge effect. |
+| `'hidden'` | No edge effect. This is the default. |
+
+## `GrabberOptions`
+
+Options for customizing the grabber (drag handle) appearance.
+
+```tsx
+<TrueSheet
+  grabber
+  grabberOptions={{
+    width: 48,
+    height: 6,
+    topMargin: 10,
+    cornerRadius: 3,
+    color: '#FF0000',
+    adaptive: false,
+  }}
+>
+  <View />
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `width` | `number` | The width of the grabber pill. | iOS: `36`, Android: `32` |
+| `height` | `number` | The height of the grabber pill. | iOS: `5`, Android: `4` |
+| `topMargin` | `number` | The top margin from the sheet edge. | iOS: `5`, Android: `16` |
+| `cornerRadius` | `number` | The corner radius of the grabber pill. | `height / 2` |
+| `color` | `ColorValue` | The color of the grabber. Uses native styling when not provided. | |
+| `adaptive` | `boolean` | Whether the grabber adapts to light/dark mode. Uses vibrancy on iOS and theme-based colors on Android. | `true` |
+
+## `AccessibilityOptions`
+
+Options for customizing (e.g. localizing) the accessibility strings announced by screen readers.
+
+```tsx
+<TrueSheet
+  accessibilityOptions={{
+    grabberLabel: 'Poignée de déplacement',
+    expandedValue: 'Développé',
+    collapsedValue: 'Réduit',
+    detentValue: 'Position {index} sur {count}',
+  }}
+>
+  <View />
+</TrueSheet>
+```
+
+| Property | Type | Description | Default |
+| - | - | - | - |
+| `grabberLabel` | `string` | The accessibility label of the grabber. | iOS: `'Sheet Grabber'`, Android: `'Drag handle'` |
+| `grabberHint` | `string` | The accessibility hint of the grabber. iOS only. | `'Double-tap to expand. Swipe up or down to resize the sheet'` |
+| `expandedValue` | `string` | The value announced when the sheet is at the last detent. | `'Expanded'` |
+| `collapsedValue` | `string` | The value announced when the sheet is at the first detent. | `'Collapsed'` |
+| `detentValue` | `string` | The value announced at intermediate detents. Supports `{index}` and `{count}` placeholders. | `'Detent {index} of {count}'` |
+| `expandActionLabel` | `string` | The label of the expand accessibility action. Android only. | `'Expand'` |
+| `collapseActionLabel` | `string` | The label of the collapse accessibility action. Android only. | `'Collapse'` |
+| `paneTitle` | `string` | The title announced when the sheet appears. Sets the accessibility pane title on Android and the hidden dialog title on Web. | Android: `'Bottom sheet'`, Web: `'Sheet'` |
+
+:::info
+On iOS, the grabber strings only apply when [`grabberOptions`](configuration#grabberoptions) is provided. Without it, iOS uses the system grabber which is already localized by the system.
+:::
+
+## `InsetAdjustment`
+
+Controls how the bottom safe area inset affects detent heights.
+
+```tsx
+<TrueSheet insetAdjustment="never">
+  <View />
+</TrueSheet>
+```
+
+| Value | Description |
+| - | - |
+| `"automatic"` | System handles insets automatically. This is the default behavior. |
+| `"never"` | TrueSheet will keep the layout as-is for precise sizing. |
+
+## `DismissThreshold`
+
+How far the sheet must be swiped down from its lowest detent to dismiss.
+
+```tsx
+<TrueSheet dismissThreshold="short">
+  <View />
+</TrueSheet>
+```
+
+| Value | Description |
+| - | - |
+| `"half"` | Dismisses past half of the lowest detent, or on a quick flick. Matches iOS. This is the default behavior. |
+| `"short"` | Dismisses on a short drag (56 dp) or any downward fling (125 dp/s), like Compose Material3's `ModalBottomSheet`. |
+
+## `DetentInfoEventPayload`
+
+`Object` that comes with most sheet events.
+
+```tsx
+{
+  index: 1,
+  position: 123.5,
+  detent: 0.5
+}
+```
+
+| Property | Type | Description |
+| - | - | - |
+| index | `number` | The detent index from the provided detents. See `detents` prop. |
+| position | `number` | The Y position of the sheet relative to the screen. |
+| detent | `number` | The detent value (0-1) for the current index. |
+
+## `PositionChangeEventPayload`
+
+`Object` that comes with the `onPositionChange` event. Extends [`DetentInfoEventPayload`](#detentinfoeventpayload).
+
+```tsx
+{
+  index: 1.5,
+  position: 123.5,
+  detent: 0.5,
+  realtime: true
+}
+```
+
+| Property | Type | Description |
+| - | - | - |
+| index | `number` | The interpolated detent index. Continuous value that smoothly transitions between detents (e.g., `0.5` means halfway between detent 0 and 1). |
+| position | `number` | The Y position of the sheet relative to the screen. |
+| detent | `number` | The detent value (0-1) for the nearest detent index. |
+| realtime | `boolean` | Whether the position is a real-time value (e.g., during drag or animation tracking). When `false`, position should be animated in JS. |

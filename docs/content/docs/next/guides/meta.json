@@ -1,0 +1,27 @@
+{
+  "title": "Guides",
+  "pages": [
+    "backgrounds",
+    "deep-linking",
+    "detents",
+    "dimming",
+    "dismissing",
+    "edge-to-edge",
+    "foldables",
+    "footer",
+    "global-methods",
+    "header",
+    "keyboard",
+    "liquid-glass",
+    "navigation",
+    "overlays",
+    "peeking",
+    "onmount",
+    "reanimated",
+    "scrolling",
+    "side-sheets",
+    "stacking",
+    "jest",
+    "web"
+  ]
+}

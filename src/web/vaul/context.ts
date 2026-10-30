@@ -1,5 +1,12 @@
 import React from 'react';
-import type { DrawerDirection } from './types';
+import type { DrawerDirection, KeyboardViewport } from './types';
+
+export interface DragEvent {
+  target: EventTarget;
+  pageX: number;
+  pageY: number;
+  pointerType: string;
+}
 
 interface DrawerContextValue {
   drawerRef: React.RefObject<HTMLDivElement | null>;
@@ -7,10 +14,16 @@ interface DrawerContextValue {
   onPress: (event: React.PointerEvent<HTMLDivElement>) => void;
   onRelease: (event: React.PointerEvent<HTMLDivElement> | null) => void;
   onDrag: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onTouchDrag: (event: DragEvent, pointerEvent?: React.PointerEvent<HTMLDivElement>) => void;
+  onTouchRelease: (
+    event: DragEvent | null,
+    pointerEvent?: React.PointerEvent<HTMLDivElement>
+  ) => void;
   onNestedDrag: (event: React.PointerEvent<HTMLDivElement>, percentageDragged: number) => void;
   onNestedOpenChange: (o: boolean) => void;
   onNestedRelease: (event: React.PointerEvent<HTMLDivElement>, open: boolean) => void;
   dismissible: boolean;
+  onDismissAttempt?: () => void;
   isOpen: boolean;
   isDragging: boolean;
   keyboardIsOpen: React.MutableRefObject<boolean>;
@@ -33,12 +46,15 @@ interface DrawerContextValue {
   container?: HTMLElement | null;
   autoFocus?: boolean;
   shouldAnimate?: React.RefObject<boolean>;
+  initialAnimated: boolean;
+  hasPresented: React.RefObject<boolean>;
   onPositionChangeRef: React.RefObject<((position: number) => void) | undefined>;
   setContentHeight: (height: number) => void;
   detached: boolean;
   detachedOffset: number;
   detachedRadius: number;
   detachedWrapperStyle?: React.CSSProperties;
+  keyboardViewport?: KeyboardViewport;
 }
 
 export const DrawerContext = React.createContext<DrawerContextValue>({
@@ -47,6 +63,8 @@ export const DrawerContext = React.createContext<DrawerContextValue>({
   onPress: () => {},
   onRelease: () => {},
   onDrag: () => {},
+  onTouchDrag: () => {},
+  onTouchRelease: () => {},
   onNestedDrag: () => {},
   onNestedOpenChange: () => {},
   onNestedRelease: () => {},
@@ -66,6 +84,8 @@ export const DrawerContext = React.createContext<DrawerContextValue>({
   closeDrawer: () => {},
   direction: 'bottom',
   shouldAnimate: { current: true },
+  initialAnimated: true,
+  hasPresented: { current: false },
   shouldScaleBackground: false,
   setBackgroundColorOnScale: true,
   noBodyStyles: false,

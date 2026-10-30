@@ -8,6 +8,10 @@
 
 #import "TrueSheetGrabberView.h"
 
+#import <React/RCTConversions.h>
+
+using namespace facebook::react;
+
 @implementation GrabberOptions
 
 - (instancetype)init {
@@ -66,9 +70,7 @@ static const CGFloat kHitPaddingVertical = 10.0;
 - (void)setupView {
   self.clipsToBounds = NO;
   self.isAccessibilityElement = YES;
-  self.accessibilityLabel = @"Sheet Grabber";
   self.accessibilityTraits = UIAccessibilityTraitAdjustable | UIAccessibilityTraitButton;
-  self.accessibilityHint = @"Double-tap to expand. Swipe up or down to resize the sheet";
 
   UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap)];
   [self addGestureRecognizer:tap];
@@ -89,6 +91,13 @@ static const CGFloat kHitPaddingVertical = 10.0;
   }
 }
 
+// Pad the pill evenly like the system grabber. The view frame itself stays inside
+// the sheet, since the reveal check reads the frame rather than this rect.
+- (CGRect)accessibilityFrame {
+  CGRect rect = CGRectInset(_vibrancyView.frame, -kHitPaddingHorizontal, -kHitPaddingVertical);
+  return UIAccessibilityConvertFrameToScreenCoordinates(rect, self);
+}
+
 - (void)accessibilityIncrement {
   if (_onIncrement) {
     _onIncrement();
@@ -103,6 +112,12 @@ static const CGFloat kHitPaddingVertical = 10.0;
 
 #pragma mark - Public
 
+- (void)setAccessibilityOptions:(TrueSheetViewAccessibilityOptionsStruct)accessibilityOptions {
+  _accessibilityOptions = accessibilityOptions;
+  self.accessibilityLabel = RCTNSStringFromStringNilIfEmpty(accessibilityOptions.grabberLabel);
+  self.accessibilityHint = RCTNSStringFromStringNilIfEmpty(accessibilityOptions.grabberHint);
+}
+
 - (void)updateAccessibilityValueWithIndex:(NSInteger)index detentCount:(NSInteger)count {
   if (index < 0 || count <= 0) {
     self.accessibilityValue = nil;
@@ -110,11 +125,13 @@ static const CGFloat kHitPaddingVertical = 10.0;
   }
 
   if (index >= count - 1) {
-    self.accessibilityValue = @"Expanded";
+    self.accessibilityValue = RCTNSStringFromStringNilIfEmpty(_accessibilityOptions.expandedValue);
   } else if (index == 0) {
-    self.accessibilityValue = @"Collapsed";
+    self.accessibilityValue = RCTNSStringFromStringNilIfEmpty(_accessibilityOptions.collapsedValue);
   } else {
-    self.accessibilityValue = [NSString stringWithFormat:@"Detent %ld of %ld", (long)(index + 1), (long)count];
+    NSString *value = RCTNSStringFromStringNilIfEmpty(_accessibilityOptions.detentValue);
+    value = [value stringByReplacingOccurrencesOfString:@"{index}" withString:@(index + 1).stringValue];
+    self.accessibilityValue = [value stringByReplacingOccurrencesOfString:@"{count}" withString:@(count).stringValue];
   }
 }
 
@@ -134,14 +151,17 @@ static const CGFloat kHitPaddingVertical = 10.0;
   CGFloat topMargin = [self effectiveTopMargin];
   CGFloat parentWidth = self.superview ? self.superview.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
 
+  // Keep the frame inside the sheet. A frame above the top edge reads as a clipped element
+  // to VoiceOver, and the sheet reveals it on focus by moving to the next detent.
   CGFloat frameWidth = pillWidth + kHitPaddingHorizontal * 2;
-  CGFloat frameHeight = pillHeight + kHitPaddingVertical * 2;
-  CGFloat frameY = topMargin - kHitPaddingVertical;
+  CGFloat frameY = MAX(0, topMargin - kHitPaddingVertical);
+  CGFloat pillY = topMargin - frameY;
+  CGFloat frameHeight = pillY + pillHeight + kHitPaddingVertical;
 
   self.frame = CGRectMake((parentWidth - frameWidth) / 2.0, frameY, frameWidth, frameHeight);
   self.backgroundColor = UIColor.clearColor;
 
-  CGRect pillRect = CGRectMake(kHitPaddingHorizontal, kHitPaddingVertical, pillWidth, pillHeight);
+  CGRect pillRect = CGRectMake(kHitPaddingHorizontal, pillY, pillWidth, pillHeight);
   _vibrancyView.frame = pillRect;
   _vibrancyView.layer.cornerRadius = [self effectiveCornerRadius];
   _vibrancyView.clipsToBounds = YES;

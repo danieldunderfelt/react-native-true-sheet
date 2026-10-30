@@ -21,7 +21,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, readonly) NSArray<NSNumber *> *detents;
 @property (nonatomic, strong, readonly, nullable) NSNumber *contentHeight;
 @property (nonatomic, strong, readonly, nullable) NSNumber *headerHeight;
+@property (nonatomic, readonly) BOOL absoluteHeader;
 @property (nonatomic, strong, readonly, nullable) NSNumber *footerHeight;
+@property (nonatomic, readonly) BOOL absoluteFooter;
+@property (nonatomic, readonly) BOOL footerInsetAdjustment;
+@property (nonatomic, readonly) BOOL footerAvoidsKeyboard;
+@property (nonatomic, readonly) CGFloat appliedFooterBottomInset;
 @property (nonatomic, strong, readonly, nullable) NSNumber *peekContentHeight;
 
 @end
@@ -41,11 +46,20 @@ NS_ASSUME_NONNULL_BEGIN
  For peek (-2) detents, calculates based on header + footer height.
  */
 - (CGFloat)detentValueForIndex:(NSInteger)index;
+- (NSInteger)backgroundIndexForPosition:(CGFloat)position displayedIndex:(NSInteger)displayedIndex;
+
+/**
+ Returns the height for auto (-1) detents: content + header + footer height.
+ An absolute (floating) header or footer contributes no height.
+ A pinned footer contributes only its overlap above the keyboard. UIKit adds
+ the keyboard expansion separately. Pass 0 for the keyboard-free height.
+ */
+- (CGFloat)autoHeightForKeyboardHeight:(CGFloat)keyboardHeight;
 
 /**
  Returns the height for peek (-2) detents: header + footer + peek content height.
- Falls back to 150 when none is present — matches the iOS 26
- floating small-detent threshold.
+ A relative footer is pushed off-screen at peek, so it contributes no height.
+ Falls back to 150 when none is present.
  */
 - (CGFloat)peekHeight;
 
@@ -54,6 +68,23 @@ NS_ASSUME_NONNULL_BEGIN
  Called when the sheet settles at a detent.
  */
 - (void)learnOffsetForDetentIndex:(NSInteger)index;
+
+/**
+ Returns the expected sheet height for a detent index: the UIKit-resolved
+ height plus the learned offset.
+ */
+- (CGFloat)resolvedHeightForIndex:(NSInteger)index;
+
+/**
+ Returns the offset learned for this detent itself, or 0 when none is learned.
+ */
+- (CGFloat)learnedOffsetForIndex:(NSInteger)index;
+
+/**
+ Sets the offset this detent is expected to rest with, unless its learned
+ offset is already within a point of it.
+ */
+- (void)assumeOffset:(CGFloat)offset forIndex:(NSInteger)index;
 
 /**
  Finds the segment between detents for a given position.

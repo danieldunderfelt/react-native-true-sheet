@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useState } from 'react';
+import { forwardRef, useCallback, useRef, useState } from 'react';
 import {
   StyleSheet,
   ScrollView,
@@ -8,6 +8,7 @@ import {
   Image,
   ActivityIndicator,
   Platform,
+  Pressable,
 } from 'react-native';
 import { TrueSheet, type TrueSheetProps } from '@lodev09/react-native-true-sheet';
 
@@ -15,24 +16,26 @@ import {
   BORDER_RADIUS,
   DARK,
   DARK_GRAY,
-  FOOTER_HEIGHT,
   GAP,
+  GRAY,
   HEADER_HEIGHT,
   LIGHT_GRAY,
   SPACING,
   times,
 } from '../../utils';
-import { Footer } from '../Footer';
-import { Header } from '../Header';
 import { Button } from '../Button';
+import { Footer, FooterPill } from '../Footer';
+import { Header } from '../Header';
+import { Text as ThemedText } from '../Text';
 
 interface ScrollViewSheetProps extends TrueSheetProps {}
 
 const HeavyItem = ({ index }: { index: number }) => {
   const [imageLoaded, setImageLoaded] = useState(false);
+  const sheet = useRef<TrueSheet>(null);
 
   return (
-    <View style={styles.item}>
+    <Pressable style={styles.item} onPress={() => console.log(`HeavyItem #${index + 1} pressed!`)}>
       <View style={styles.imageContainer}>
         {!imageLoaded && <ActivityIndicator style={styles.loader} size="small" />}
         <Image
@@ -41,18 +44,60 @@ const HeavyItem = ({ index }: { index: number }) => {
           onLoad={() => setImageLoaded(true)}
         />
       </View>
-      <View style={styles.itemContent}>
+      <Pressable style={styles.itemContent} onPress={() => sheet.current?.present()}>
         <Text style={styles.itemTitle}>Item #{index + 1}</Text>
         <Text style={styles.itemDescription}>
           Complex component with images and text to test heavy rendering and lazy loading.
         </Text>
-      </View>
-    </View>
+      </Pressable>
+      <TrueSheet ref={sheet} detents={[0.5]} backgroundColor={Platform.select({ android: DARK })}>
+        <View style={styles.placeholder}>
+          <ThemedText style={styles.placeholderText}>Sheet content</ThemedText>
+        </View>
+      </TrueSheet>
+    </Pressable>
   );
 };
 
+const CARD_WIDTH = SPACING * 11;
+const CARD_SNAP = CARD_WIDTH + GAP;
+
+const Card = ({ index }: { index: number }) => (
+  <Pressable style={styles.card} onPress={() => console.log(`Card #${index + 1} pressed!`)}>
+    <Image
+      source={{ uri: `https://picsum.photos/seed/card-${index}/400/400` }}
+      style={styles.cardImage}
+    />
+    <View style={styles.cardContent}>
+      <Text style={styles.cardTitle}>Card #{index + 1}</Text>
+      <Text style={styles.cardCaption}>Swipe horizontally</Text>
+    </View>
+  </Pressable>
+);
+
+// Horizontal scrolling inside the sheet — the sheet should not drag while
+// the carousel is panning sideways.
+const Carousel = () => (
+  <View style={styles.carousel}>
+    <ThemedText style={styles.sectionTitle}>Featured</ThemedText>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      snapToInterval={CARD_SNAP}
+      decelerationRate="fast"
+      style={styles.carouselScroll}
+      contentContainerStyle={styles.carouselContent}
+    >
+      {times(10, (i) => (
+        <Card key={i} index={i} />
+      ))}
+    </ScrollView>
+  </View>
+);
+
 export const ScrollViewSheet = forwardRef<TrueSheet, ScrollViewSheetProps>((props, ref) => {
-  const [showList, setShowList] = useState(true);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const [showList, setShowList] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const onRefresh = useCallback(() => {
@@ -65,7 +110,8 @@ export const ScrollViewSheet = forwardRef<TrueSheet, ScrollViewSheetProps>((prop
       ref={ref}
       detents={[0.8, 1]}
       name="scrollview"
-      scrollable
+      style={styles.sheet}
+      scrollableRef={scrollViewRef}
       scrollableOptions={{
         scrollingExpandsSheet: false,
         bottomScrollEdgeEffect: 'soft',
@@ -73,33 +119,41 @@ export const ScrollViewSheet = forwardRef<TrueSheet, ScrollViewSheetProps>((prop
       }}
       backgroundColor={Platform.select({ android: DARK })}
       header={<Header />}
-      headerStyle={styles.header}
+      headerOptions={{ position: 'absolute' }}
       footer={
-        <Footer wrapperStyle={styles.footer}>
-          <Button text="Toggle ListView" onPress={() => setShowList(!showList)} />
+        // The footer background is transparent on iOS, so it follows the theme
+        <Footer themed={Platform.OS === 'ios'}>
+          <FooterPill text="Toggle ListView" onPress={() => setShowList(!showList)} />
         </Footer>
       }
+      footerStyle={styles.footer}
+      footerOptions={{ position: 'absolute' }}
       onDidDismiss={() => console.log('Sheet ScrollView dismissed!')}
       onDidPresent={() => console.log(`Sheet ScrollView presented!`)}
       {...props}
     >
-      {showList ? (
-        <ScrollView
-          contentContainerStyle={styles.content}
-          indicatorStyle="black"
-          scrollIndicatorInsets={{ bottom: FOOTER_HEIGHT }}
-          keyboardDismissMode="on-drag"
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        >
-          {times(20, (i) => (
-            <HeavyItem key={i} index={i} />
-          ))}
-        </ScrollView>
-      ) : (
-        <View style={styles.placeholder}>
-          <Text style={styles.placeholderText}>List is hidden</Text>
-        </View>
-      )}
+      <View style={styles.wrapper} collapsable={false}>
+        {showList ? (
+          <ScrollView
+            ref={scrollViewRef}
+            contentContainerStyle={styles.content}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          >
+            <Carousel />
+            {times(20, (i) => (
+              <HeavyItem key={i} index={i} />
+            ))}
+          </ScrollView>
+        ) : (
+          <View style={[styles.placeholder, styles.listPlaceholder]}>
+            <ThemedText style={styles.placeholderText}>
+              The ScrollView is not mounted yet — mounting it after the sheet has presented tests
+              late scrollable detection.
+            </ThemedText>
+            <Button text="Show ScrollView" onPress={() => setShowList(true)} />
+          </View>
+        )}
+      </View>
     </TrueSheet>
   );
 });
@@ -107,23 +161,63 @@ export const ScrollViewSheet = forwardRef<TrueSheet, ScrollViewSheetProps>((prop
 ScrollViewSheet.displayName = 'ScrollViewSheet';
 
 const styles = StyleSheet.create({
+  sheet: {
+    flex: 1,
+  },
+  wrapper: {
+    flex: 1,
+  },
+  // The footer and safe-area insets are applied natively (contentInsetAdjustment)
   content: {
     padding: SPACING,
     paddingTop: HEADER_HEIGHT + SPACING,
-    paddingBottom: FOOTER_HEIGHT + SPACING,
     gap: GAP,
-  },
-  header: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    zIndex: 1,
   },
   footer: {
     backgroundColor: Platform.select({
       default: DARK_GRAY,
       ios: undefined,
     }),
+  },
+  carousel: {
+    gap: GAP,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    // The sheet background is fixed DARK on Android; themed elsewhere
+    ...Platform.select({ android: { color: LIGHT_GRAY } }),
+  },
+  // Bleed past the content padding so cards can scroll edge to edge
+  carouselScroll: {
+    marginHorizontal: -SPACING,
+  },
+  carouselContent: {
+    paddingHorizontal: SPACING,
+    gap: GAP,
+  },
+  card: {
+    width: CARD_WIDTH,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    borderRadius: BORDER_RADIUS,
+    overflow: 'hidden',
+  },
+  cardImage: {
+    width: '100%',
+    height: CARD_WIDTH,
+  },
+  cardContent: {
+    padding: GAP,
+  },
+  cardTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  cardCaption: {
+    fontSize: 13,
+    color: GRAY,
+    marginTop: 2,
   },
   item: {
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
@@ -164,8 +258,17 @@ const styles = StyleSheet.create({
     padding: SPACING,
     alignItems: 'center',
   },
+  // Clear the absolute header so the message sits in the visible area
+  listPlaceholder: {
+    flex: 1,
+    paddingTop: HEADER_HEIGHT + SPACING * 2,
+    gap: SPACING,
+  },
   placeholderText: {
-    color: 'rgba(255, 255, 255, 0.3)',
     fontSize: 14,
+    opacity: 0.5,
+    textAlign: 'center',
+    // The sheet background is fixed DARK on Android; themed elsewhere
+    ...Platform.select({ android: { color: LIGHT_GRAY } }),
   },
 });

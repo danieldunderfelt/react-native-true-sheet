@@ -1,69 +1,98 @@
-import type { ColorValue, ProcessedColorValue, ViewProps } from 'react-native';
-import type {
-  DirectEventHandler,
-  Double,
-  Int32,
-  WithDefault,
-} from 'react-native/Libraries/Types/CodegenTypes';
+import type { CodegenTypes, ColorValue, ProcessedColorValue, ViewProps } from 'react-native';
 import { codegenNativeComponent } from 'react-native';
 
 type GrabberOptionsType = Readonly<{
-  width?: Double;
-  height?: Double;
-  topMargin?: Double;
-  cornerRadius?: WithDefault<Double, -1>;
+  width?: CodegenTypes.Double;
+  height?: CodegenTypes.Double;
+  topMargin?: CodegenTypes.Double;
+  cornerRadius?: CodegenTypes.WithDefault<CodegenTypes.Double, -1>;
   color?: ProcessedColorValue | null;
-  adaptive?: WithDefault<boolean, true>;
+  adaptive?: CodegenTypes.WithDefault<boolean, true>;
 }>;
 
-type BlurOptionsType = Readonly<{
-  intensity?: WithDefault<Double, -1>;
-  interaction?: WithDefault<boolean, true>;
+type AccessibilityOptionsType = Readonly<{
+  grabberLabel?: CodegenTypes.WithDefault<string, 'Sheet Grabber'>;
+  grabberHint?: CodegenTypes.WithDefault<
+    string,
+    'Double-tap to expand. Swipe up or down to resize the sheet'
+  >;
+  expandedValue?: CodegenTypes.WithDefault<string, 'Expanded'>;
+  collapsedValue?: CodegenTypes.WithDefault<string, 'Collapsed'>;
+  detentValue?: CodegenTypes.WithDefault<string, 'Detent {index} of {count}'>;
+  expandActionLabel?: CodegenTypes.WithDefault<string, 'Expand'>;
+  collapseActionLabel?: CodegenTypes.WithDefault<string, 'Collapse'>;
+  paneTitle?: CodegenTypes.WithDefault<string, 'Bottom sheet'>;
 }>;
 
 type ScrollEdgeEffect = 'automatic' | 'hard' | 'soft' | 'hidden';
 
 type ScrollableOptionsType = Readonly<{
-  keyboardScrollOffset?: WithDefault<Double, 0>;
-  scrollingExpandsSheet?: WithDefault<boolean, true>;
-  topScrollEdgeEffect?: WithDefault<ScrollEdgeEffect, 'hidden'>;
-  bottomScrollEdgeEffect?: WithDefault<ScrollEdgeEffect, 'hidden'>;
+  contentInsetAdjustment?: CodegenTypes.WithDefault<
+    'automatic' | 'safe-area' | 'footer' | 'never',
+    'automatic'
+  >;
+  keyboardScrollOffset?: CodegenTypes.WithDefault<CodegenTypes.Double, 0>;
+  keyboardOffset?: CodegenTypes.WithDefault<CodegenTypes.Double, 0>;
+  scrollingExpandsSheet?: CodegenTypes.WithDefault<boolean, true>;
+  topScrollEdgeEffect?: CodegenTypes.WithDefault<ScrollEdgeEffect, 'hidden'>;
+  bottomScrollEdgeEffect?: CodegenTypes.WithDefault<ScrollEdgeEffect, 'hidden'>;
 }>;
 
 type FooterOptionsType = Readonly<{
-  keyboardOffset?: WithDefault<Double, 0>;
+  // Named uniquely across option structs — codegen derives the enum name from
+  // the field name, so a second `position` would redefine TrueSheetViewPosition
+  footerPosition?: CodegenTypes.WithDefault<'relative' | 'absolute', 'relative'>;
+  keyboardOffset?: CodegenTypes.WithDefault<CodegenTypes.Double, 0>;
+  avoidKeyboard?: CodegenTypes.WithDefault<boolean, true>;
+}>;
+
+type HeaderOptionsType = Readonly<{
+  position?: CodegenTypes.WithDefault<'relative' | 'absolute', 'relative'>;
+}>;
+
+type FoldOptionsType = Readonly<{
+  hingeDetentIndex?: CodegenTypes.WithDefault<CodegenTypes.Int32, -1>;
+  hingeBehavior?: CodegenTypes.WithDefault<'none' | 'avoid' | 'snap', 'none'>;
 }>;
 
 export interface DetentInfoEventPayload {
-  index: Int32;
-  position: Double;
-  detent: Double;
+  index: CodegenTypes.Int32;
+  position: CodegenTypes.Double;
+  detent: CodegenTypes.Double;
 }
 
 export interface PositionChangeEventPayload {
-  index: Double;
-  position: Double;
-  detent: Double;
+  index: CodegenTypes.Double;
+  position: CodegenTypes.Double;
+  detent: CodegenTypes.Double;
   realtime: boolean;
 }
 
 export interface NativeProps extends ViewProps {
   // Array properties
-  detents?: ReadonlyArray<Double>;
+  detents?: ReadonlyArray<CodegenTypes.Double>;
+  detentBackgrounds?: ReadonlyArray<
+    Readonly<{
+      color?: ProcessedColorValue | null;
+      blur?: string;
+    }>
+  >;
 
   // Number properties - use 0 as default to avoid nil insertion
-  maxContentHeight?: WithDefault<Double, 0>;
-  maxContentWidth?: WithDefault<Double, 0>;
-  cornerRadius?: WithDefault<Double, -1>;
-  elevation?: WithDefault<Double, -1>;
+  maxContentHeight?: CodegenTypes.WithDefault<CodegenTypes.Double, 0>;
+  maxContentWidth?: CodegenTypes.WithDefault<CodegenTypes.Double, 0>;
+  cornerRadius?: CodegenTypes.WithDefault<CodegenTypes.Double, -1>;
+  elevation?: CodegenTypes.WithDefault<CodegenTypes.Double, -1>;
 
   // Color properties
   backgroundColor?: ColorValue;
-  initialDetentIndex?: WithDefault<Int32, -1>;
-  dimmedDetentIndex?: WithDefault<Int32, 0>;
+  initialDetentIndex?: CodegenTypes.WithDefault<CodegenTypes.Int32, -1>;
+  dimColor?: ColorValue;
+  dimOpacity?: CodegenTypes.WithDefault<CodegenTypes.Double, -1>;
+  dimmedDetentIndex?: CodegenTypes.WithDefault<CodegenTypes.Int32, 0>;
 
   // String properties - use empty string as default to avoid nil insertion
-  backgroundBlur?: WithDefault<
+  backgroundBlur?: CodegenTypes.WithDefault<
     | 'none'
     | 'light'
     | 'dark'
@@ -89,41 +118,48 @@ export interface NativeProps extends ViewProps {
     'none'
   >;
 
-  anchor?: WithDefault<'left' | 'center' | 'right', 'center'>;
-  anchorOffset?: WithDefault<Double, 16>;
-  insetAdjustment?: WithDefault<'automatic' | 'never', 'automatic'>;
-
-  // Blur options
-  blurOptions?: BlurOptionsType;
+  placement?: CodegenTypes.WithDefault<
+    'automatic' | 'leading' | 'center' | 'trailing',
+    'automatic'
+  >;
+  placementOffset?: CodegenTypes.WithDefault<CodegenTypes.Double, 16>;
+  insetAdjustment?: CodegenTypes.WithDefault<'automatic' | 'never', 'automatic'>;
+  dismissThreshold?: CodegenTypes.WithDefault<'half' | 'short', 'half'>;
 
   // Boolean properties - match defaults from TrueSheet.types.ts
-  grabber?: WithDefault<boolean, true>;
+  grabber?: CodegenTypes.WithDefault<boolean, true>;
   grabberOptions?: GrabberOptionsType;
-  dismissible?: WithDefault<boolean, true>;
-  draggable?: WithDefault<boolean, true>;
-  dimmed?: WithDefault<boolean, true>;
-  initialDetentAnimated?: WithDefault<boolean, true>;
-  scrollable?: WithDefault<boolean, false>;
+  accessibilityOptions?: AccessibilityOptionsType;
+  dismissible?: CodegenTypes.WithDefault<boolean, true>;
+  draggable?: CodegenTypes.WithDefault<boolean, true>;
+  dimmed?: CodegenTypes.WithDefault<boolean, true>;
+  initialDetentAnimated?: CodegenTypes.WithDefault<boolean, true>;
+  suspended?: CodegenTypes.WithDefault<boolean, false>;
+  // React tag of the scrollable component within the content (see scrollableRef)
+  scrollableHandle?: CodegenTypes.WithDefault<CodegenTypes.Int32, -1>;
   scrollableOptions?: ScrollableOptionsType;
+  headerOptions?: HeaderOptionsType;
   footerOptions?: FooterOptionsType;
-  presentation?: WithDefault<'page' | 'form', 'page'>;
+  foldOptions?: FoldOptionsType;
+  presentation?: CodegenTypes.WithDefault<'page' | 'form', 'page'>;
 
   // Event handlers
-  onMount?: DirectEventHandler<null>;
-  onWillPresent?: DirectEventHandler<DetentInfoEventPayload>;
-  onDidPresent?: DirectEventHandler<DetentInfoEventPayload>;
-  onWillDismiss?: DirectEventHandler<null>;
-  onDidDismiss?: DirectEventHandler<null>;
-  onDetentChange?: DirectEventHandler<DetentInfoEventPayload>;
-  onDragBegin?: DirectEventHandler<DetentInfoEventPayload>;
-  onDragChange?: DirectEventHandler<DetentInfoEventPayload>;
-  onDragEnd?: DirectEventHandler<DetentInfoEventPayload>;
-  onPositionChange?: DirectEventHandler<PositionChangeEventPayload>;
-  onWillFocus?: DirectEventHandler<null>;
-  onDidFocus?: DirectEventHandler<null>;
-  onWillBlur?: DirectEventHandler<null>;
-  onDidBlur?: DirectEventHandler<null>;
-  onVisibilityChange?: DirectEventHandler<Readonly<{ visible: boolean }>>;
+  onMount?: CodegenTypes.DirectEventHandler<null>;
+  onWillPresent?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onDidPresent?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onWillDismiss?: CodegenTypes.DirectEventHandler<null>;
+  onDidDismiss?: CodegenTypes.DirectEventHandler<null>;
+  onDismissAttempt?: CodegenTypes.DirectEventHandler<null>;
+  onDetentChange?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onDragBegin?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onDragChange?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onDragEnd?: CodegenTypes.DirectEventHandler<DetentInfoEventPayload>;
+  onPositionChange?: CodegenTypes.DirectEventHandler<PositionChangeEventPayload>;
+  onWillFocus?: CodegenTypes.DirectEventHandler<null>;
+  onDidFocus?: CodegenTypes.DirectEventHandler<null>;
+  onWillBlur?: CodegenTypes.DirectEventHandler<null>;
+  onDidBlur?: CodegenTypes.DirectEventHandler<null>;
+  onVisibilityChange?: CodegenTypes.DirectEventHandler<Readonly<{ visible: boolean }>>;
 }
 
 export default codegenNativeComponent<NativeProps>('TrueSheetView', {

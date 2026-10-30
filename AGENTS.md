@@ -2,10 +2,9 @@
 
 ## Rules
 
-1. YOU MUST NOT do builds unless you are told to.
-2. YOU MUST NOT commit changes yourself until I explicitly tell you to.
-3. YOU MUST NOT create summary documents unless you are told to.
-4. YOU MUST NOT add code comments that are obvious.
+1. YOU MUST NOT commit changes yourself until I explicitly tell you to.
+2. YOU MUST NOT create summary documents unless you are told to.
+3. YOU MUST NOT add code comments that are obvious.
 
 ## Project Overview
 
@@ -71,6 +70,18 @@ Both platforms: `TrueSheetView` (hidden host) → Controller → `ContainerView`
 2. Create event class in `ios/events/` and `android/.../events/`
 3. Emit from native view
 
+### Updating the AI skill
+
+`skills/truesheet-usage/` is the consumer-facing skill installed via `npx skills add lodev09/react-native-true-sheet`. Whenever docs under `docs/content/docs/next/` change (new prop, event, method, guide, limitation, or troubleshooting entry), update the skill to match in the same PR:
+
+- `SKILL.md` — quick-start recipes, "Rules That Save Debugging Time", platform table
+- `references/configuration.md` — props (mirror `reference/configuration.mdx` + `types.mdx`)
+- `references/api.md` — events and methods
+- `references/advanced-patterns.md` — navigation, reanimated, web, overlays, jest, migration
+- `references/troubleshooting.md` — symptom → cause → fix entries
+
+The skill summarizes the docs, it does not copy them. Keep entries terse and code-first. Add a `💡 Others` changelog entry when the skill changes.
+
 ### Creating a Pull Request
 
 When creating a PR, use the template from `.github/PULL_REQUEST_TEMPLATE.md`.
@@ -79,12 +90,4 @@ When creating a PR, use the template from `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ### Changelog
 
-Add entry to `Unreleased` section in `CHANGELOG.md` for user-facing changes:
-
-- `🎉 New features` - New functionality
-- `🐛 Bug fixes` - Bug fixes
-- `💡 Others` - Refactors, internal changes
-
-Format: `- **Platform**: Description. ([#123](https://github.com/lodev09/react-native-true-sheet/pull/123) by [@username](https://github.com/username))`
-
-Sort entries by platform: **iOS** first, then **Android**, then **Web**, then cross-platform or unscoped entries last.
+Follow the `changelog` skill (`.agents/skills/changelog`) to add, extend, or skip the PR's entry in the `Unreleased` section of `CHANGELOG.md`.

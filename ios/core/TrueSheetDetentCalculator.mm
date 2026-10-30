@@ -19,8 +19,7 @@
   if (index >= 0 && index < (NSInteger)detents.count) {
     CGFloat value = [detents[index] doubleValue];
     if (value == -1) {
-      CGFloat autoHeight = [self.delegate.contentHeight floatValue] + [self.delegate.headerHeight floatValue];
-      return autoHeight / self.delegate.screenHeight;
+      return [self autoHeightForKeyboardHeight:0] / self.delegate.screenHeight;
     }
     if (value == -2) {
       return [self peekHeight] / self.delegate.screenHeight;
@@ -30,9 +29,24 @@
   return 0;
 }
 
+- (CGFloat)autoHeightForKeyboardHeight:(CGFloat)keyboardHeight {
+  // An absolute (floating) header or footer overlaps the content, so it contributes no height —
+  // unless the footer pads the scrollable, then the content ends above it like a relative footer
+  CGFloat headerHeight = self.delegate.absoluteHeader ? 0 : [self.delegate.headerHeight floatValue];
+  BOOL floatingFooter = self.delegate.absoluteFooter && !self.delegate.footerInsetAdjustment;
+  CGFloat footerHeight = floatingFooter ? 0 : [self.delegate.footerHeight floatValue];
+  if (self.delegate.absoluteFooter && !floatingFooter && !self.delegate.footerAvoidsKeyboard) {
+    footerHeight -= MIN(keyboardHeight, MAX(0, footerHeight - self.delegate.appliedFooterBottomInset));
+  }
+  return [self.delegate.contentHeight floatValue] + headerHeight + footerHeight;
+}
+
 - (CGFloat)peekHeight {
-  CGFloat height = [self.delegate.headerHeight floatValue] + [self.delegate.footerHeight floatValue] +
-                   [self.delegate.peekContentHeight floatValue];
+  // A relative footer is laid out below the content, so it's pushed off-screen
+  // at the peek detent and contributes no height
+  CGFloat footerHeight = self.delegate.absoluteFooter ? [self.delegate.footerHeight floatValue] : 0;
+  CGFloat height =
+    [self.delegate.headerHeight floatValue] + footerHeight + [self.delegate.peekContentHeight floatValue];
   return height > 0 ? height : 150;
 }
 
@@ -66,13 +80,25 @@
   return detentValue * self.delegate.screenHeight;
 }
 
+- (CGFloat)learnedOffsetForIndex:(NSInteger)index {
+  if (index >= 0 && index < (NSInteger)_resolvedDetentOffsets.count) {
+    return [_resolvedDetentOffsets[index] doubleValue];
+  }
+  return 0;
+}
+
+- (void)assumeOffset:(CGFloat)offset forIndex:(NSInteger)index {
+  if (index >= 0 && index < (NSInteger)_resolvedDetentOffsets.count &&
+      fabs([_resolvedDetentOffsets[index] doubleValue] - offset) > 1) {
+    _resolvedDetentOffsets[index] = @(offset);
+  }
+}
+
 - (CGFloat)offsetForIndex:(NSInteger)index {
   // Use this detent's own offset if available
-  if (index >= 0 && index < (NSInteger)_resolvedDetentOffsets.count) {
-    CGFloat offset = [_resolvedDetentOffsets[index] doubleValue];
-    if (offset != 0)
-      return offset;
-  }
+  CGFloat learnedOffset = [self learnedOffsetForIndex:index];
+  if (learnedOffset != 0)
+    return learnedOffset;
 
   // Fall back to any known offset
   for (NSInteger i = 0; i < (NSInteger)_resolvedDetentOffsets.count; i++) {
@@ -82,6 +108,24 @@
   }
 
   return 0;
+}
+
+- (NSInteger)backgroundIndexForPosition:(CGFloat)position displayedIndex:(NSInteger)displayedIndex {
+  NSInteger count = self.delegate.detents.count;
+  if (count == 0)
+    return -1;
+
+  CGFloat height = self.delegate.screenHeight - position;
+  NSInteger nextIndex = MAX(0, MIN(displayedIndex, count - 1));
+  CGFloat distance = fabs(height - [self resolvedHeightForIndex:nextIndex]);
+  for (NSInteger index = 0; index < count; index++) {
+    CGFloat nextDistance = fabs(height - [self resolvedHeightForIndex:index]);
+    if (nextDistance < distance) {
+      nextIndex = index;
+      distance = nextDistance;
+    }
+  }
+  return nextIndex;
 }
 
 - (BOOL)findSegmentForPosition:(CGFloat)position outIndex:(NSInteger *)outIndex outProgress:(CGFloat *)outProgress {

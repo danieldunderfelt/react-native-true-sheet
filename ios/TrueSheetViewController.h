@@ -26,6 +26,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)viewControllerDidPresentAtIndex:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent;
 - (void)viewControllerWillDismiss;
 - (void)viewControllerDidDismiss;
+- (void)viewControllerDidAttemptDismiss;
 - (void)viewControllerDidChangeDetent:(NSInteger)index position:(CGFloat)position detent:(CGFloat)detent;
 - (void)viewControllerDidDrag:(UIGestureRecognizerState)state
                         index:(NSInteger)index
@@ -36,6 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
                                  detent:(CGFloat)detent
                                realtime:(BOOL)realtime;
 - (void)viewControllerDidChangeSize:(CGSize)size;
+- (void)viewControllerSafeAreaInsetsDidChange;
 - (void)viewControllerWillFocus;
 - (void)viewControllerDidFocus;
 - (void)viewControllerWillBlur;
@@ -53,36 +55,106 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak, nullable) id<TrueSheetViewControllerDelegate> delegate;
 @property (nonatomic, strong) NSArray<NSNumber *> *detents;
+@property (nonatomic, copy) NSArray<NSDictionary *> *detentBackgrounds;
 @property (nonatomic, strong, nullable) NSNumber *maxContentHeight;
 @property (nonatomic, strong, nullable) NSNumber *maxContentWidth;
 @property (nonatomic, strong, nullable) NSNumber *contentHeight;
 @property (nonatomic, strong, nullable) NSNumber *headerHeight;
+@property (nonatomic, assign) BOOL absoluteHeader;
 @property (nonatomic, strong, nullable) NSNumber *footerHeight;
+@property (nonatomic, assign) BOOL absoluteFooter;
+
+/**
+ * YES while the plugged scrollable is padded by the absolute footer's height
+ * (see ScrollableOptions.contentInsetAdjustment) — the footer then counts
+ * toward the auto detent like a relative one, so the content ends above it.
+ */
+@property (nonatomic, assign) BOOL footerInsetAdjustment;
 @property (nonatomic, strong, nullable) NSNumber *peekContentHeight;
 @property (nonatomic, strong, nullable) UIColor *backgroundColor;
 @property (nonatomic, strong, nullable) NSNumber *cornerRadius;
 @property (nonatomic, assign) BOOL grabber;
 @property (nonatomic, strong, nullable) GrabberOptions *grabberOptions;
+@property (nonatomic, assign) facebook::react::TrueSheetViewAccessibilityOptionsStruct accessibilityOptions;
 @property (nonatomic, assign) BOOL draggable;
 @property (nonatomic, assign) BOOL dimmed;
+@property (nonatomic, strong, nullable) UIColor *dimColor;
+@property (nonatomic, strong, nullable) NSNumber *dimOpacity;
 @property (nonatomic, strong, nullable) NSNumber *dimmedDetentIndex;
 @property (nonatomic, assign) facebook::react::TrueSheetViewBackgroundBlur backgroundBlur;
-@property (nonatomic, strong, nullable) NSNumber *blurIntensity;
-@property (nonatomic, assign) BOOL blurInteraction;
 @property (nonatomic, assign) facebook::react::TrueSheetViewPresentation presentation;
-@property (nonatomic, assign) facebook::react::TrueSheetViewAnchor anchor;
+@property (nonatomic, assign) facebook::react::TrueSheetViewPlacement placement;
+@property (nonatomic, assign) facebook::react::TrueSheetViewFoldOptionsStruct foldOptions;
 @property (nonatomic, assign) facebook::react::TrueSheetViewInsetAdjustment insetAdjustment;
 @property (nonatomic, assign) BOOL scrollingExpandsSheet;
 @property (nonatomic, assign) CGFloat footerKeyboardOffset;
+
+/**
+ * NO keeps an absolute footer pinned to the sheet's bottom edge behind the
+ * keyboard instead of rising above it.
+ */
+@property (nonatomic, assign) BOOL footerAvoidsKeyboard;
 @property (nonatomic, assign) BOOL dismissible;
 @property (nonatomic, assign) BOOL isPresented;
+
+/**
+ * Set once the host lets go of a controller that is still presented (recycle
+ * or dealloc). It then dismisses itself from its own presenter, non-animated,
+ * as soon as no transition or stacked child is in the way.
+ */
+@property (nonatomic, assign) BOOL orphanedAfterUnmount;
+
+/**
+ * YES when the current dismissal is collateral of the presenter itself being
+ * dismissed (e.g. a modal route closing beneath the sheet), not the sheet
+ * closing. A parent sheet dismissing its stack doesn't count.
+ */
+@property (nonatomic, assign) BOOL dismissedWithPresenter;
 @property (nonatomic, assign) NSInteger activeDetentIndex;
+
+/**
+ * YES while the keyboard has the sheet grown beyond its detent height.
+ * Offset learning is skipped in this state — the measured frame would bake
+ * ~keyboardHeight into the learned offset.
+ */
+@property (nonatomic, assign) BOOL keyboardSheetGrown;
+
+/**
+ * Target keyboard height, set as soon as the keyboard frame change is
+ * announced — ahead of the grow/shrink animation, unlike keyboardSheetGrown.
+ */
+@property (nonatomic, assign) CGFloat keyboardHeight;
+
+/**
+ * How far UIKit grows the sheet for the iPadOS minimized keyboard, which it
+ * treats as docked. Taken off every detent so the sheet stays put.
+ */
+@property (nonatomic, assign) CGFloat minimizedKeyboardOverlap;
+
 @property (nonatomic, readonly) BOOL isTopmostPresentedController;
+@property (nonatomic, readonly) BOOL isStackedBehindChild;
 @property (nonatomic, weak, nullable) UIView *accessibilityContentView;
 
 @property (nonatomic, readonly) CGFloat screenHeight;
 
+/**
+ * Bottom safe-area inset the footer absorbs as padding — the footer
+ * owns the sheet's bottom edge, so its background fills the inset.
+ */
+@property (nonatomic, readonly) CGFloat footerBottomInset;
+
+/**
+ * The inset currently baked into the footer's measured height, reported
+ * alongside its layout (see TrueSheetFooterView.appliedBottomInset). Detent
+ * resolution subtracts this exact value so the baked inset is never
+ * double-counted.
+ */
+@property (nonatomic, assign) CGFloat appliedFooterBottomInset;
+
 - (void)setupAccessibilityContainer;
+- (void)refreshAccessibilityContainer;
+- (void)refreshAccessibilityContainerIfFooterChanged;
+
 - (void)applyActiveDetent;
 - (void)setupActiveDetentWithIndex:(NSInteger)index;
 - (void)resizeToDetentIndex:(NSInteger)index;
@@ -91,8 +163,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setupSheetDetents;
 - (void)setupSheetDetentsForSizeChange;
 - (void)setupSheetDetentsForDetentsChange;
+- (void)invalidateDetents;
 - (void)setupDraggable;
 - (void)setupAnchorViewInView:(UIView *)parentView;
+- (void)attemptOrphanTeardown;
 
 - (void)beginInteractiveDismiss;
 - (void)updateInteractiveDismiss:(CGFloat)progress;

@@ -1,19 +1,24 @@
-import type {
-  DefaultNavigatorOptions,
-  Descriptor,
-  NavigationHelpers,
-  NavigationProp,
-  NavigationState,
-  ParamListBase,
-  RouteProp,
-  StackActionHelpers,
-} from '@react-navigation/core';
+import type { NavigatorArgs } from 'standard-navigation';
 
 import type {
   DetentInfoEventPayload,
   PositionChangeEventPayload,
   TrueSheetProps,
 } from '../TrueSheet.types';
+import type { TrueSheetActionType } from './actions';
+import type {
+  DefaultNavigatorOptions,
+  Descriptor,
+  NavigationAction,
+  NavigationHelpers,
+  NavigationProp,
+  NavigationState,
+  ParamListBase,
+  RouteProp,
+  Router,
+  StackActionHelpers,
+  StackRouterOptions,
+} from './base-types';
 
 export type PositionChangeHandler = (payload: PositionChangeEventPayload) => void;
 
@@ -34,6 +39,10 @@ export type TrueSheetNavigationEventMap = {
    * Event fired when the sheet has been dismissed.
    */
   sheetDidDismiss: { data: undefined };
+  /**
+   * Event fired when the user tries to dismiss a non-dismissible sheet.
+   */
+  sheetDismissAttempt: { data: undefined };
   /**
    * Event fired when the sheet's detent changes.
    */
@@ -72,25 +81,102 @@ export type TrueSheetNavigationEventMap = {
   sheetDidBlur: { data: undefined };
 };
 
-export type TrueSheetNavigationState<ParamList extends ParamListBase> = Omit<
-  NavigationState<ParamList>,
+/**
+ * A navigation state tagged as `true-sheet`, with the sheet fields the router
+ * adds to each route.
+ * Generic over the base state so each entry point can bind its own
+ * `NavigationState` — see `./base-types`.
+ */
+export type TrueSheetStateOf<State extends { routes: readonly unknown[] }> = Omit<
+  State,
   'routes'
 > & {
   type: 'true-sheet';
-  routes: (NavigationState<ParamList>['routes'][number] & {
+  routes: (State['routes'][number] & {
     resizeIndex?: number;
     resizeKey?: number;
     closing?: boolean;
+    // Stacked above a `closing` route and dismissed natively with it
+    dismissing?: boolean;
+    // Takes the `closing` route's place once it has dismissed (a sheet `REPLACE`)
+    pendingReplace?: State['routes'][number];
   })[];
 };
 
-export type TrueSheetActionHelpers<ParamList extends ParamListBase> =
-  StackActionHelpers<ParamList> & {
-    /**
-     * Resize the sheet to a specific detent index.
-     */
-    resize(index?: number): void;
+export type TrueSheetNavigationState<ParamList extends ParamListBase> = TrueSheetStateOf<
+  NavigationState<ParamList>
+>;
+
+export type TrueSheetRouterState = TrueSheetNavigationState<ParamListBase>;
+
+export type TrueSheetRouterOptions = StackRouterOptions;
+
+export type TrueSheetRouter = Router<TrueSheetRouterState, TrueSheetActionType>;
+
+/**
+ * The wrapped router factory — also the shape `createTrueSheetRouter` accepts,
+ * pre-instantiated so either entry point's `StackRouterFactory` fits it.
+ */
+export type TrueSheetRouterFactory = (options: TrueSheetRouterOptions) => TrueSheetRouter;
+
+/**
+ * The base `StackRouter` factory to wrap, typed generically over the state and
+ * action types the wrapper threads through — `StackRouter` is structural and
+ * never touches the sheet-specific fields.
+ * Injected by each entry point so the shared router never imports
+ * `@react-navigation/*` at runtime (Expo Router apps don't install it).
+ */
+export type StackRouterFactory = <
+  State extends NavigationState<ParamListBase>,
+  Action extends NavigationAction,
+>(
+  options: TrueSheetRouterOptions
+) => Router<State, Action>;
+
+/**
+ * `TrueSheetNavigationEventMap` in the `standard-navigation` event-map shape.
+ */
+export type TrueSheetStandardEventMap = {
+  [K in keyof TrueSheetNavigationEventMap]: {
+    data: TrueSheetNavigationEventMap[K]['data'];
+    canPreventDefault: false;
   };
+};
+
+export type TrueSheetRoute = TrueSheetNavigationState<ParamListBase>['routes'][number];
+
+export type TrueSheetDispatch = (action: TrueSheetActionType) => void;
+
+export type TrueSheetEmitFn = NavigatorArgs<
+  TrueSheetNavigationOptions,
+  TrueSheetStandardEventMap
+>['emitter']['emit'];
+
+/**
+ * Props injected into the navigator content by each adapter
+ * (React Navigation's `mapper` / Expo Router's `createProps`).
+ * Raw routes carry the custom fields (`closing`, `dismissing`, `resizeIndex`, `resizeKey`)
+ * that the standard state strips out.
+ */
+export interface TrueSheetNavigatorContentExtraProps {
+  routes: TrueSheetRoute[];
+  dispatch: TrueSheetDispatch;
+}
+
+/**
+ * Generic over the base helpers so each entry point can bind its own
+ * `StackActionHelpers` — see `./base-types`.
+ */
+export type TrueSheetActionHelpersOf<Helpers> = Helpers & {
+  /**
+   * Resize the sheet to a specific detent index.
+   */
+  resize(index?: number): void;
+};
+
+export type TrueSheetActionHelpers<ParamList extends ParamListBase> = TrueSheetActionHelpersOf<
+  StackActionHelpers<ParamList>
+>;
 
 export type TrueSheetNavigationProp<
   ParamList extends ParamListBase,
@@ -124,27 +210,36 @@ export type TrueSheetNavigationSheetProps = Pick<
   TrueSheetProps,
   | 'detents'
   | 'backgroundColor'
+  | 'detentBackgrounds'
+  | 'background'
+  | 'backgroundStyle'
   | 'cornerRadius'
   | 'dismissible'
   | 'draggable'
   | 'grabber'
   | 'grabberOptions'
+  | 'accessibilityOptions'
   | 'dimmed'
+  | 'dimColor'
+  | 'dimOpacity'
   | 'dimmedDetentIndex'
   | 'backgroundBlur'
-  | 'blurOptions'
   | 'maxContentHeight'
   | 'maxContentWidth'
-  | 'scrollable'
   | 'presentation'
+  | 'style'
   | 'header'
   | 'headerStyle'
+  | 'headerOptions'
   | 'footer'
   | 'footerStyle'
+  | 'footerOptions'
+  | 'scrollableRef'
   | 'scrollableOptions'
   | 'insetAdjustment'
-  | 'anchor'
-  | 'anchorOffset'
+  | 'placement'
+  | 'placementOffset'
+  | 'foldOptions'
   | 'elevation'
   | 'detached'
   | 'detachedOffset'

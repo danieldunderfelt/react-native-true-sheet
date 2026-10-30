@@ -1,9 +1,15 @@
 // @ts-nocheck — vendored upstream, incompatible with noUncheckedIndexedAccess
 import React from 'react';
-import { set, isVertical } from './helpers';
-import { DEFAULT_PEEK_HEIGHT, TRANSITIONS, VELOCITY_THRESHOLD } from './constants';
+import { set, isVertical, getSnapPointTransform } from './helpers';
+import {
+  DEFAULT_PEEK_HEIGHT,
+  SHORT_DISMISS_DISTANCE,
+  SHORT_DISMISS_VELOCITY,
+  TRANSITIONS,
+  VELOCITY_THRESHOLD,
+} from './constants';
 import { useControllableState } from './use-controllable-state';
-import type { DrawerDirection } from './types';
+import type { DrawerDirection, KeyboardViewport } from './types';
 
 export function useSnapPoints({
   activeSnapPointProp,
@@ -22,6 +28,7 @@ export function useSnapPoints({
   maxContentHeight,
   peekHeight,
   initialAnimated = true,
+  keyboardViewport,
 }: {
   activeSnapPointProp?: number | string | null;
   setActiveSnapPointProp?(snapPoint: number | null | string): void;
@@ -29,7 +36,7 @@ export function useSnapPoints({
   fadeFromIndex?: number;
   drawerRef: React.RefObject<HTMLDivElement | null>;
   overlayRef: React.RefObject<HTMLDivElement | null>;
-  onSnapPointChange(activeSnapPointIndex: number): void;
+  onSnapPointChange(activeSnapPointIndex: number, animated: boolean): void;
   direction?: DrawerDirection;
   container?: HTMLElement | null | undefined;
   snapToSequentialPoint?: boolean;
@@ -39,6 +46,7 @@ export function useSnapPoints({
   maxContentHeight?: number;
   peekHeight?: number;
   initialAnimated?: boolean;
+  keyboardViewport?: KeyboardViewport;
 }) {
   const [activeSnapPoint, setActiveSnapPoint] = useControllableState<string | number | null>({
     prop: activeSnapPointProp,
@@ -92,13 +100,18 @@ export function useSnapPoints({
           height: container.getBoundingClientRect().height,
         }
       : typeof window !== 'undefined'
-        ? { width: window.innerWidth, height: window.innerHeight }
+        ? { width: window.innerWidth, height: keyboardViewport?.height ?? window.innerHeight }
         : { width: 0, height: 0 };
 
     // Shrink the effective vertical area by detachedOffset so snap math
     // reserves a fixed gap at the bottom — the floating card stays offset
     // from the viewport edge through drag, snap and resize.
     const effectiveHeight = Math.max(0, containerSize.height - (detachedOffset || 0));
+    // Above a keyboard, fractional snap points keep their full-height size and
+    // only cap at the visible area — mirrors native, where the sheet rises.
+    const fractionHeight = keyboardViewport
+      ? Math.max(0, keyboardViewport.layoutHeight - (detachedOffset || 0))
+      : effectiveHeight;
 
     return (
       snapPoints?.map((snapPoint) => {
@@ -123,11 +136,11 @@ export function useSnapPoints({
           const rawHeight = isPx
             ? snapPointAsNumber
             : windowDimensions
-              ? resolved * effectiveHeight
+              ? resolved * fractionHeight
               : 0;
-          // Cap px/'auto' snap points so a content taller than the viewport
-          // doesn't push the drawer past the top edge (offset would go
-          // negative). Fractional detents are already ≤ effectiveHeight.
+          // Cap snap points so content taller than the viewport (or a
+          // fraction above a keyboard) doesn't push the drawer past the top
+          // edge (offset would go negative).
           // `maxContentHeight`, when set, caps the visible sheet further so
           // full/'auto' detents respect the user's ceiling.
           const ceiling =
@@ -164,7 +177,10 @@ export function useSnapPoints({
     detachedOffset,
     maxContentHeight,
     peekHeight,
+    keyboardViewport,
   ]);
+
+  const getViewportHeight = () => keyboardViewport?.height ?? window.innerHeight;
 
   const activeSnapPointOffset = React.useMemo(
     () => (activeSnapPointIndex !== null ? snapPointsOffset?.[activeSnapPointIndex] : null),
@@ -187,29 +203,46 @@ export function useSnapPoints({
     });
   };
 
-  // Skip the transition on the very first snap when the consumer opts out of
-  // the initial presentation animation. All subsequent snaps still animate.
+  // Initial measurements can take several commits before the first paint.
+  // Keep all of them unanimated when initial presentation animation is disabled.
   const hasSnappedRef = React.useRef(false);
+  const initialSnapFrameRef = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (initialSnapFrameRef.current !== null) {
+        window.cancelAnimationFrame(initialSnapFrameRef.current);
+        initialSnapFrameRef.current = null;
+      }
+    },
+    []
+  );
   const snapToPoint = React.useCallback(
     (dimension: number) => {
+      if (!drawerRef.current) return;
       const newSnapPointIndex =
         snapPointsOffset?.findIndex((snapPointDim) => snapPointDim === dimension) ?? null;
-      onSnapPointChange(newSnapPointIndex);
 
       const animateThisSnap = hasSnappedRef.current || initialAnimated;
-      hasSnappedRef.current = true;
+      if (initialSnapFrameRef.current === null) {
+        initialSnapFrameRef.current = window.requestAnimationFrame(() => {
+          hasSnappedRef.current = true;
+        });
+      }
+      // One animated value drives both the translation and the visible height.
       set(drawerRef.current, {
-        transition: animateThisSnap
-          ? `transform ${TRANSITIONS.DURATION}s cubic-bezier(${TRANSITIONS.EASE.join(',')})`
+        'transition': animateThisSnap
+          ? `--snap-point-height ${TRANSITIONS.DURATION}s cubic-bezier(${TRANSITIONS.EASE.join(',')})`
           : 'none',
-        transform: isVertical(direction)
-          ? `translate3d(0, ${dimension}px, 0)`
-          : `translate3d(${dimension}px, 0, 0)`,
+        'transform': getSnapPointTransform(direction),
+        '--snap-point-height': `${dimension}px`,
       });
 
       // Snapping implies drag overshoot (if any) should be undone.
       setDetachedWrapperTransform(0, animateThisSnap);
 
+      const overlayTransition = animateThisSnap
+        ? `opacity ${TRANSITIONS.DURATION}s cubic-bezier(${TRANSITIONS.EASE.join(',')})`
+        : 'none';
       if (
         snapPointsOffset &&
         newSnapPointIndex !== snapPointsOffset.length - 1 &&
@@ -218,24 +251,33 @@ export function useSnapPoints({
         newSnapPointIndex < fadeFromIndex
       ) {
         set(overlayRef.current, {
-          transition: `opacity ${TRANSITIONS.DURATION}s cubic-bezier(${TRANSITIONS.EASE.join(',')})`,
+          transition: overlayTransition,
           opacity: '0',
           pointerEvents: 'none',
         });
       } else {
         set(overlayRef.current, {
-          transition: `opacity ${TRANSITIONS.DURATION}s cubic-bezier(${TRANSITIONS.EASE.join(',')})`,
+          transition: overlayTransition,
           opacity: '1',
           pointerEvents: 'auto',
         });
       }
 
+      onSnapPointChange(newSnapPointIndex, animateThisSnap);
       setActiveSnapPoint(snapPoints?.[Math.max(newSnapPointIndex, 0)]);
     },
-    [drawerRef.current, snapPoints, snapPointsOffset, fadeFromIndex, overlayRef, setActiveSnapPoint]
+    [
+      drawerRef.current,
+      snapPoints,
+      snapPointsOffset,
+      fadeFromIndex,
+      overlayRef,
+      setActiveSnapPoint,
+      initialAnimated,
+    ]
   );
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (!isOpen) return;
     if (activeSnapPoint || activeSnapPointProp) {
       const newIndex =
@@ -253,11 +295,13 @@ export function useSnapPoints({
     closeDrawer,
     velocity,
     dismissible,
+    dismissThreshold,
   }: {
     draggedDistance: number;
     closeDrawer: () => void;
     velocity: number;
     dismissible: boolean;
+    dismissThreshold: 'half' | 'short';
   }) {
     if (fadeFromIndex === undefined) return;
 
@@ -275,6 +319,23 @@ export function useSnapPoints({
       });
     }
 
+    // Short threshold: below the lowest detent, close on a short drag or any
+    // downward fling, like Compose Material3's sheet.
+    if (
+      dismissThreshold === 'short' &&
+      dismissible &&
+      (direction === 'bottom' || direction === 'right') &&
+      currentPosition > snapPointsOffset[0]
+    ) {
+      const overshoot = currentPosition - snapPointsOffset[0];
+      if (velocity > SHORT_DISMISS_VELOCITY || overshoot > SHORT_DISMISS_DISTANCE) {
+        closeDrawer();
+      } else {
+        snapToPoint(snapPointsOffset[0]);
+      }
+      return;
+    }
+
     // Distance-based dismiss: when overshooting past the lowest detent by more
     // than half of its visible height, commit to dismiss regardless of
     // velocity — lets a slow drag-down still close the sheet.
@@ -283,7 +344,7 @@ export function useSnapPoints({
       (direction === 'bottom' || direction === 'right') &&
       currentPosition > snapPointsOffset[0]
     ) {
-      const viewportDim = isVertical(direction) ? window.innerHeight : window.innerWidth;
+      const viewportDim = isVertical(direction) ? getViewportHeight() : window.innerWidth;
       const effectiveDim = Math.max(0, viewportDim - (detachedOffset || 0));
       const visibleAtLowest = Math.max(0, effectiveDim - snapPointsOffset[0]);
       const overshoot = currentPosition - snapPointsOffset[0];
@@ -311,7 +372,7 @@ export function useSnapPoints({
       return Math.abs(curr - currentPosition) < Math.abs(prev - currentPosition) ? curr : prev;
     });
 
-    const dim = isVertical(direction) ? window.innerHeight : window.innerWidth;
+    const dim = isVertical(direction) ? getViewportHeight() : window.innerWidth;
     if (velocity > VELOCITY_THRESHOLD && Math.abs(draggedDistance) < dim * 0.4) {
       const dragDirection = hasDraggedUp ? 1 : -1; // 1 = up, -1 = down
 
@@ -360,19 +421,20 @@ export function useSnapPoints({
     if ((direction === 'bottom' || direction === 'right') && newValue > snapPointsOffset[0]) {
       const excess = newValue - snapPointsOffset[0];
       set(drawerRef.current, {
-        transform: isVertical(direction)
-          ? `translate3d(0, ${snapPointsOffset[0]}px, 0)`
-          : `translate3d(${snapPointsOffset[0]}px, 0, 0)`,
+        'transform': getSnapPointTransform(direction),
+        '--snap-point-height': `${snapPointsOffset[0]}px`,
       });
       setDetachedWrapperTransform(excess, false);
       return;
     }
 
     setDetachedWrapperTransform(0, false);
+    // Keep `--snap-point-height` tracking the live drag position so layouts
+    // derived from it (e.g. the scrollable fill) resize with the drawer
+    // instead of staying cut off at the last detent's visible height.
     set(drawerRef.current, {
-      transform: isVertical(direction)
-        ? `translate3d(0, ${newValue}px, 0)`
-        : `translate3d(${newValue}px, 0, 0)`,
+      'transform': getSnapPointTransform(direction),
+      '--snap-point-height': `${newValue}px`,
     });
   }
 
@@ -392,7 +454,7 @@ export function useSnapPoints({
       if (activeSnapPointIndex === 0 && !isDraggingDown) {
         const activeOffset = snapPointsOffset[activeSnapPointIndex];
         if (activeOffset === undefined) return 0;
-        const windowDim = isVertical(direction) ? window.innerHeight : window.innerWidth;
+        const windowDim = isVertical(direction) ? getViewportHeight() : window.innerWidth;
         const dismissOffset =
           direction === 'bottom' || direction === 'right' ? windowDim : -windowDim;
         const dismissRange = Math.abs(dismissOffset - activeOffset);

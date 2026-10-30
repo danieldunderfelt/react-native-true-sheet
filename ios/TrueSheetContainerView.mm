@@ -17,7 +17,6 @@
 #import "TrueSheetViewController.h"
 #import "core/TrueSheetKeyboardObserver.h"
 #import "utils/UIView+ScrollEdgeInteraction.h"
-#import "utils/WindowUtil.h"
 
 #import <react/renderer/components/TrueSheetSpec/ComponentDescriptors.h>
 #import <react/renderer/components/TrueSheetSpec/EventEmitters.h>
@@ -26,7 +25,6 @@
 
 #import <React/RCTConversions.h>
 #import <React/RCTLog.h>
-#import <react/renderer/core/LayoutMetrics.h>
 
 using namespace facebook::react;
 
@@ -34,12 +32,24 @@ using namespace facebook::react;
 
 - (instancetype)init {
   if (self = [super init]) {
+    _contentInsetAdjustment = TrueSheetViewContentInsetAdjustment::Automatic;
     _keyboardScrollOffset = 0;
+    _keyboardOffset = 0;
     _scrollingExpandsSheet = YES;
     _topScrollEdgeEffect = TrueSheetViewTopScrollEdgeEffect::Hidden;
     _bottomScrollEdgeEffect = TrueSheetViewBottomScrollEdgeEffect::Hidden;
   }
   return self;
+}
+
+- (BOOL)safeAreaInsetAdjustment {
+  return _contentInsetAdjustment == TrueSheetViewContentInsetAdjustment::Automatic ||
+         _contentInsetAdjustment == TrueSheetViewContentInsetAdjustment::SafeArea;
+}
+
+- (BOOL)footerInsetAdjustment {
+  return _contentInsetAdjustment == TrueSheetViewContentInsetAdjustment::Automatic ||
+         _contentInsetAdjustment == TrueSheetViewContentInsetAdjustment::Footer;
 }
 
 @end
@@ -56,7 +66,6 @@ using namespace facebook::react;
   TrueSheetFooterView *_footerView;
   TrueSheetPeekView *__weak _peekView;
   TrueSheetKeyboardObserver *_keyboardObserver;
-  BOOL _scrollableSet;
 }
 
 #pragma mark - Initialization
@@ -74,7 +83,6 @@ using namespace facebook::react;
     _contentView = nil;
     _headerView = nil;
     _footerView = nil;
-    _scrollableSet = NO;
     self.isAccessibilityElement = NO;
   }
   return self;
@@ -109,13 +117,8 @@ using namespace facebook::react;
 
 #pragma mark - Layout
 
-- (void)layoutSubviews {
-  [super layoutSubviews];
-  [_contentView updateScrollViewHeight];
-}
-
 - (CGFloat)contentHeight {
-  return _contentView ? _contentView.frame.size.height : 0;
+  return _contentView ? _contentView.naturalHeight : 0;
 }
 
 - (CGFloat)headerHeight {
@@ -124,6 +127,10 @@ using namespace facebook::react;
 
 - (CGFloat)footerHeight {
   return _footerView ? _footerView.frame.size.height : 0;
+}
+
+- (CGFloat)footerAppliedBottomInset {
+  return _footerView ? _footerView.appliedBottomInset : 0;
 }
 
 // Distance from the top of the content view to the bottom of the peek view.
@@ -141,36 +148,32 @@ using namespace facebook::react;
   return CGRectGetMaxY([_peekView convertRect:_peekView.bounds toView:_contentView]);
 }
 
-- (void)layoutFooter {
-  if (_footerView) {
-    CGFloat height = _footerView.frame.size.height;
-    if (height > 0) {
-      [_footerView setupConstraintsWithHeight:height];
-    }
-  }
-}
-
 - (void)updateFooterKeyboardOffset {
   [_footerView applyKeyboardOffset];
 }
 
-- (void)setScrollableEnabled:(BOOL)scrollableEnabled {
-  _scrollableEnabled = scrollableEnabled;
-  _scrollableSet = YES;
+- (void)setFooterBottomInset:(CGFloat)footerBottomInset {
+  _footerBottomInset = footerBottomInset;
+  [_footerView setBottomInset:footerBottomInset];
 }
 
 - (void)setScrollableOptions:(ScrollableOptions *)scrollableOptions {
   _scrollableOptions = scrollableOptions;
   _contentView.keyboardScrollOffset = scrollableOptions ? scrollableOptions.keyboardScrollOffset : 0;
+  _contentView.keyboardOffset = scrollableOptions ? scrollableOptions.keyboardOffset : 0;
+}
+
+- (void)setFooterInsetAdjustment:(BOOL)footerInsetAdjustment {
+  _footerInsetAdjustment = footerInsetAdjustment;
+  _contentView.footerInsetAdjustment = footerInsetAdjustment;
 }
 
 - (void)setupScrollable {
-  if (_scrollableSet && _contentView) {
-    CGFloat bottomInset = 0;
-    if (_insetAdjustment == TrueSheetViewInsetAdjustment::Automatic) {
-      bottomInset = [WindowUtil keyWindow].safeAreaInsets.bottom;
-    }
-    [_contentView setupScrollable:_scrollableEnabled bottomInset:bottomInset];
+  if (_contentView) {
+    _contentView.scrollableHandle = _scrollableHandle;
+    _contentView.safeAreaInsetAdjustment = _safeAreaInsetAdjustment;
+    _contentView.footerInsetAdjustment = _footerInsetAdjustment;
+    [_contentView setupScrollable];
     [_contentView applyScrollEdgeEffects:_scrollableOptions];
     if (@available(iOS 26.0, *)) {
       [self setupEdgeInteractions];
@@ -214,6 +217,8 @@ using namespace facebook::react;
     }
     _contentView = (TrueSheetContentView *)childComponentView;
     _contentView.delegate = self;
+    _contentView.footerView = _footerView;
+    _contentView.footerInsetAdjustment = _footerInsetAdjustment;
 
     // Children mount bottom-up, so the content subtree is complete here.
     // Late-mounted peek views attach themselves instead (see TrueSheetPeekView).
@@ -240,25 +245,35 @@ using namespace facebook::react;
     }
     _footerView = (TrueSheetFooterView *)childComponentView;
     _footerView.delegate = self;
+    _contentView.footerView = _footerView;
+    [_footerView setBottomInset:_footerBottomInset];
     [self footerViewDidChangeSize:_footerView.frame.size];
+
+    // The observer is set up on present — a footer mounted after that (e.g. a
+    // conditional one) joins it here and rises above a keyboard that's already open
+    _footerView.keyboardObserver = _keyboardObserver;
+    [self updateFooterKeyboardOffset];
   }
 }
 
 - (void)unmountChildComponentView:(UIView<RCTComponentViewProtocol> *)childComponentView index:(NSInteger)index {
-  if ([childComponentView isKindOfClass:[TrueSheetContentView class]]) {
+  if (childComponentView == _contentView) {
+    _contentView.keyboardObserver = nil;
     _contentView.delegate = nil;
     _contentView = nil;
   }
 
-  if ([childComponentView isKindOfClass:[TrueSheetHeaderView class]]) {
+  if (childComponentView == _headerView) {
     _headerView.delegate = nil;
     _headerView = nil;
     [self headerViewDidChangeSize:CGSizeZero];
   }
 
-  if ([childComponentView isKindOfClass:[TrueSheetFooterView class]]) {
+  if (childComponentView == _footerView) {
+    _footerView.keyboardObserver = nil;
     _footerView.delegate = nil;
     _footerView = nil;
+    _contentView.footerView = nil;
     [self footerViewDidChangeSize:CGSizeZero];
   }
 
@@ -269,12 +284,6 @@ using namespace facebook::react;
   [super updateProps:props oldProps:oldProps];
 }
 
-#pragma clang diagnostic ignored "-Wobjc-missing-super-calls"
-- (void)updateLayoutMetrics:(const LayoutMetrics &)layoutMetrics
-           oldLayoutMetrics:(const LayoutMetrics &)oldLayoutMetrics {
-  // Intentionally skip super - AutoLayout handles container's frame, not Yoga
-}
-
 #pragma mark - TrueSheetContentViewDelegate
 
 - (void)contentViewDidChangeSize:(CGSize)newSize {
@@ -283,6 +292,12 @@ using namespace facebook::react;
 
 - (void)contentViewScrollViewDidChange {
   [self.delegate containerViewScrollViewDidChange];
+}
+
+// Footer controls can mount, unmount, or hide deep in its subtree without
+// passing through its own mount hooks or changing its size.
+- (void)contentViewDidMountTransaction {
+  [self.delegate containerViewDidMountTransaction];
 }
 
 #pragma mark - TrueSheetHeaderViewDelegate
@@ -298,6 +313,7 @@ using namespace facebook::react;
 
 - (void)footerViewDidChangeSize:(CGSize)newSize {
   [self.delegate containerViewFooterDidChangeSize:newSize];
+  [_contentView updateBottomInset];
   if (@available(iOS 26.0, *)) {
     [self setupEdgeInteractions];
   }
@@ -325,10 +341,9 @@ using namespace facebook::react;
     return;
   }
 
-  if (_peekView != nil) {
-    RCTLogWarn(@"TrueSheet: Sheet can only have one peek component.");
-    return;
-  }
+  // Last-attached wins. During a screen transition the incoming peek mounts
+  // before the outgoing one detaches, and the outgoing detach is a no-op.
+  _peekView.delegate = nil;
 
   _peekView = peekView;
   peekView.delegate = self;
@@ -356,17 +371,8 @@ using namespace facebook::react;
 
   _keyboardObserver = [[TrueSheetKeyboardObserver alloc] init];
   _keyboardObserver.viewController = (TrueSheetViewController *)viewController;
-
-  if (_contentView) {
-    _contentView.keyboardObserver = _keyboardObserver;
-    [_keyboardObserver addDelegate:_contentView];
-  }
-
-  if (_footerView) {
-    _footerView.keyboardObserver = _keyboardObserver;
-    [_keyboardObserver addDelegate:_footerView];
-  }
-
+  _contentView.keyboardObserver = _keyboardObserver;
+  _footerView.keyboardObserver = _keyboardObserver;
   [_keyboardObserver start];
 }
 

@@ -14,30 +14,24 @@ import type {
   PositionChangeEventPayload,
   WillBlurEvent,
   WillDismissEvent,
+  DismissAttemptEvent,
   WillFocusEvent,
   WillPresentEvent,
 } from '../../TrueSheet.types';
-import type {
-  TrueSheetNavigationEventMap,
-  TrueSheetNavigationHelpers,
-  TrueSheetNavigationProp,
-} from '../types';
-import { TrueSheetActions } from '../TrueSheetRouter';
-import type { ParamListBase } from '@react-navigation/core';
-
-type EmitFn = TrueSheetNavigationHelpers['emit'];
+import type { TrueSheetDispatch, TrueSheetEmitFn, TrueSheetNavigationEventMap } from '../types';
+import { TrueSheetActions } from '../actions';
 
 interface UseSheetScreenStateProps {
   detentIndex: number;
   resizeKey?: number;
   closing?: boolean;
-  navigation: TrueSheetNavigationProp<ParamListBase>;
+  dispatch: TrueSheetDispatch;
   routeKey: string;
-  emit: EmitFn;
+  emit: TrueSheetEmitFn;
 }
 
 export const useSheetScreenState = (props: UseSheetScreenStateProps) => {
-  const { detentIndex, resizeKey, closing, navigation, routeKey, emit } = props;
+  const { detentIndex, resizeKey, closing, dispatch, routeKey, emit } = props;
 
   const ref = useRef<TrueSheet>(null);
   const isDismissedRef = useRef(false);
@@ -68,7 +62,7 @@ export const useSheetScreenState = (props: UseSheetScreenStateProps) => {
         type,
         target: routeKey,
         data,
-      } as Parameters<EmitFn>[0]);
+      } as Parameters<TrueSheetEmitFn>[0]);
     },
     [emit, routeKey]
   );
@@ -76,8 +70,8 @@ export const useSheetScreenState = (props: UseSheetScreenStateProps) => {
   const onDidDismiss = useCallback(() => {
     emitEvent('sheetDidDismiss', undefined);
     isDismissedRef.current = true;
-    navigation.dispatch({ ...TrueSheetActions.remove(), source: routeKey });
-  }, [emitEvent, navigation, routeKey]);
+    dispatch({ ...TrueSheetActions.remove(), source: routeKey });
+  }, [emitEvent, dispatch, routeKey]);
 
   const eventHandlers = useMemo(
     () => ({
@@ -85,6 +79,7 @@ export const useSheetScreenState = (props: UseSheetScreenStateProps) => {
       onDidPresent: (e: DidPresentEvent) => emitEvent('sheetDidPresent', e.nativeEvent),
       onWillDismiss: (_e: WillDismissEvent) => emitEvent('sheetWillDismiss', undefined),
       onDidDismiss,
+      onDismissAttempt: (_e: DismissAttemptEvent) => emitEvent('sheetDismissAttempt', undefined),
       onDetentChange: (e: DetentChangeEvent) => emitEvent('sheetDetentChange', e.nativeEvent),
       onDragBegin: (e: DragBeginEvent) => emitEvent('sheetDragBegin', e.nativeEvent),
       onDragChange: (e: DragChangeEvent) => emitEvent('sheetDragChange', e.nativeEvent),

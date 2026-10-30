@@ -10,8 +10,11 @@ import android.view.ViewGroup
 import android.widget.EditText
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import com.facebook.react.uimanager.PixelUtil.dpToPx
 import com.facebook.react.uimanager.PointerEvents
 import com.facebook.react.uimanager.ReactPointerEventsView
+import com.facebook.react.uimanager.TouchTargetHelper
+import com.lodev09.truesheet.utils.KeyboardUtils
 import com.lodev09.truesheet.utils.isDescendantOf
 
 interface TrueSheetCoordinatorLayoutDelegate {
@@ -19,6 +22,15 @@ interface TrueSheetCoordinatorLayoutDelegate {
   fun coordinatorLayoutDidChangeConfiguration()
   fun findScrollView(): ViewGroup?
   fun findSheetView(): TrueSheetBottomSheetView?
+
+  /**
+   * A downward pull the sheet couldn't follow ended; `overdragPx` is the travel it
+   * didn't follow, `keyboardWasVisible` whether the keyboard was up when it began.
+   */
+  fun coordinatorLayoutDidPullDown(overdragPx: Int, keyboardWasVisible: Boolean)
+
+  // A touch that began inside the sheet ended, after the behavior handled the release
+  fun coordinatorLayoutDidEndTouch()
 }
 
 /**
@@ -55,6 +67,42 @@ class TrueSheetCoordinatorLayout(context: Context) :
   private var streamHasGestureRoot = false
   private var streamGestureClaimed = false
 
+  // Whether the sheet owns vertical drags for this stream: the touch target is inside
+  // the sheet but outside the detected scrollable (e.g. a header overlaying it), with
+  // nothing vertically scrollable along its chain. Such targets consume the stream
+  // natively (no nested scroll), and BottomSheetBehavior won't intercept because the
+  // scrollable's bounds still contain the point (touchingScrollingChild) — intercept
+  // manually.
+  private var streamSheetDraggable = false
+  private var streamDraggableEditText = false
+  private var streamScrollsIndependently = false
+
+  // Pull-down tracking. BottomSheetBehavior gives no callback when a downward drag
+  // is clamped by `isHideable = false` — the sheet stays put (or the scrollable
+  // overscrolls) and no state change fires. Accumulate the downward finger travel
+  // neither the sheet nor a scroller under the finger followed and report it on
+  // release so the controller can surface a blocked dismiss attempt. Like iOS, a
+  // pull that began on a scroller that could scroll up stays a scroll, even past
+  // its top.
+  private var pullTracking = false
+  private var pullStartX = 0f
+  private var pullStartY = 0f
+  private var pullLastY = 0f
+  private var pullOverdrag = 0f
+  private var pullKeyboardVisible = false
+  private var pullScrollers: List<View> = emptyList()
+  private var pullBeganScrolled = false
+
+  // A touch that began inside the sheet is still down
+  val isTouchingSheet: Boolean
+    get() = pullTracking
+
+  // Set while the sheet presents, from present() (keyboard wait included) until the
+  // present finishes or a dismiss starts. A stream that begins meanwhile is swallowed
+  // whole so nothing below takes it, like the iOS presentation transition.
+  var blocksTouches = false
+  private var streamBlocked = false
+
   init {
     layoutParams = LayoutParams(
       LayoutParams.MATCH_PARENT,
@@ -84,6 +132,68 @@ class TrueSheetCoordinatorLayout(context: Context) :
   override val pointerEvents: PointerEvents
     get() = PointerEvents.BOX_NONE
 
+  override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+    if (ev.actionMasked == MotionEvent.ACTION_DOWN) streamBlocked = blocksTouches
+    if (streamBlocked) {
+      if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
+        streamBlocked = false
+      }
+      return true
+    }
+
+    when (ev.actionMasked) {
+      MotionEvent.ACTION_DOWN -> {
+        val sheet = delegate?.findSheetView()
+        pullTracking = sheet != null && isTouchInside(sheet, ev)
+        pullStartX = ev.rawX
+        pullStartY = ev.rawY
+        pullLastY = ev.rawY
+        pullOverdrag = 0f
+        pullKeyboardVisible = pullTracking && KeyboardUtils.isKeyboardVisible(this)
+      }
+
+      MotionEvent.ACTION_MOVE -> if (pullTracking) {
+        val sheet = delegate?.findSheetView()
+        val topBefore = sheet?.top
+        val handled = super.dispatchTouchEvent(ev)
+        val step = ev.rawY - pullLastY
+        pullLastY = ev.rawY
+        // Finger moved down but the sheet stayed put and nothing under the finger
+        // scrolled — the pull was clamped
+        if (!pullBeganScrolled &&
+          step > 0 &&
+          sheet != null &&
+          sheet.top == topBefore &&
+          pullScrollers.none { it.canScrollVertically(-1) }
+        ) {
+          pullOverdrag += step
+        }
+        return handled
+      }
+
+      MotionEvent.ACTION_UP -> if (pullTracking) {
+        pullTracking = false
+        val dx = kotlin.math.abs(ev.rawX - pullStartX)
+        val dy = ev.rawY - pullStartY
+        // Let the behavior settle first so the controller sees the resting position.
+        val handled = super.dispatchTouchEvent(ev)
+        if (dy > dx && pullOverdrag > PULL_DOWN_THRESHOLD_DP.dpToPx()) {
+          delegate?.coordinatorLayoutDidPullDown(pullOverdrag.toInt(), pullKeyboardVisible)
+        }
+        delegate?.coordinatorLayoutDidEndTouch()
+        return handled
+      }
+
+      MotionEvent.ACTION_CANCEL -> if (pullTracking) {
+        pullTracking = false
+        val handled = super.dispatchTouchEvent(ev)
+        delegate?.coordinatorLayoutDidEndTouch()
+        return handled
+      }
+    }
+    return super.dispatchTouchEvent(ev)
+  }
+
   /**
    * Clears stale `nestedScrollingChildRef` from BottomSheetBehavior.
    *
@@ -107,39 +217,85 @@ class TrueSheetCoordinatorLayout(context: Context) :
 
   override fun requestDisallowInterceptTouchEvent(disallowIntercept: Boolean) {
     // RN's ReactEditText fires this(true) on ACTION_DOWN, killing sheet drag over an input.
-    // Swallow only that case — an EditText under the touch with nothing vertically scrollable
-    // (a pinned ScrollView or an overflowing multiline EditText still scrolls). Other children
-    // (maps, sliders, scrollables) keep the standard disallow contract.
-    if (disallowIntercept && touchedViewIsEditText() && !touchedViewCanScrollVertically()) return
+    // Swallow only that case — nothing between the touched EditText and the sheet scrolls
+    // (an overflowing multiline EditText or an input inside a scrollable that can actually
+    // scroll still scrolls). Other children (maps, sliders, scrollables) keep the standard
+    // disallow contract.
+    if (disallowIntercept && streamDraggableEditText) return
     super.requestDisallowInterceptTouchEvent(disallowIntercept)
   }
 
-  private fun touchedViewIsEditText(): Boolean = findDescendantAt(this, streamInitialX.toInt(), streamInitialY.toInt()) { it is EditText }
+  /**
+   * Resolves the stream's touch target (respecting zIndex and pointerEvents) and
+   * decides whether the sheet may drag from it — inside the sheet, outside the detected
+   * scrollable, and nothing along the target's chain scrolls vertically. Also collects
+   * the chain's vertical scrollers for pull-down tracking.
+   */
+  private fun updateStreamTargetFlags(ev: MotionEvent) {
+    streamSheetDraggable = false
+    streamDraggableEditText = false
+    streamScrollsIndependently = false
+    pullScrollers = emptyList()
+    pullBeganScrolled = false
 
-  private fun touchedViewCanScrollVertically(): Boolean {
-    delegate?.findScrollView()?.let {
-      if (it.canScrollVertically(1) || it.canScrollVertically(-1)) return true
+    val sheet = delegate?.findSheetView() ?: return
+    val target = TouchTargetHelper.findTargetPathAndCoordinatesForTouch(ev.x, ev.y, this, FloatArray(2))
+      .firstNotNullOfOrNull { it.getView() } ?: return
+    if (target !== sheet && !target.isDescendantOf(sheet)) return
+
+    pullScrollers = generateSequence(target) { it.parent as? View }
+      .takeWhile { it !== this }
+      .filter { it.canScrollVertically(1) || it.canScrollVertically(-1) }
+      .toList()
+    pullBeganScrolled = pullScrollers.any { it.canScrollVertically(-1) }
+
+    // A detected scrollable that can scroll (or hosts pull-to-refresh) owns its
+    // touches — nested scrolling drags the sheet. When it can't scroll (e.g.
+    // the sheet is fully expanded and the content fits) it eats the gesture
+    // instead, so fall through and let the sheet drag from it — an EditText
+    // target needs the disallow-intercept swallow or its stream dies.
+    val scrollView = delegate?.findScrollView()
+    if (scrollView != null && (target === scrollView || target.isDescendantOf(scrollView))) {
+      val hasRefreshControl = scrollView.parent is SwipeRefreshLayout
+      if (hasRefreshControl || scrollView.scrollY > 0 || scrollView.canScrollVertically(1)) return
     }
-    return findDescendantAt(this, streamInitialX.toInt(), streamInitialY.toInt()) {
-      it.canScrollVertically(1) || it.canScrollVertically(-1)
+
+    var view: View? = target
+    while (view != null && view !== this) {
+      if (view.canScrollVertically(1) || view.canScrollVertically(-1)) {
+        streamScrollsIndependently = !view.isNestedScrollingEnabled
+        return
+      }
+      view = view.parent as? View
     }
+
+    streamSheetDraggable = true
+    streamDraggableEditText = target is EditText
   }
 
-  private fun findDescendantAt(view: View, rawX: Int, rawY: Int, predicate: (View) -> Boolean): Boolean {
+  private fun isTouchInside(view: View, ev: MotionEvent): Boolean {
     val loc = IntArray(2)
     view.getLocationOnScreen(loc)
-    if (rawX < loc[0] || rawX > loc[0] + view.width || rawY < loc[1] || rawY > loc[1] + view.height) return false
-    if (predicate(view)) return true
+    val x = ev.rawX.toInt()
+    val y = ev.rawY.toInt()
+    return x >= loc[0] && x <= loc[0] + view.width && y >= loc[1] && y <= loc[1] + view.height
+  }
+
+  private fun findDescendantViewAt(view: View, rawX: Int, rawY: Int, predicate: (View) -> Boolean): View? {
+    val loc = IntArray(2)
+    view.getLocationOnScreen(loc)
+    if (rawX < loc[0] || rawX > loc[0] + view.width || rawY < loc[1] || rawY > loc[1] + view.height) return null
+    if (predicate(view)) return view
     if (view is ViewGroup) {
       for (i in 0 until view.childCount) {
-        if (findDescendantAt(view.getChildAt(i), rawX, rawY, predicate)) return true
+        findDescendantViewAt(view.getChildAt(i), rawX, rawY, predicate)?.let { return it }
       }
     }
-    return false
+    return null
   }
 
   /**
-   * Called by descendant RootView implementations (controller, footer) when a child
+   * Called by the descendant RootView (controller) when a child
    * starts a native gesture — e.g. an RNGH handler activated or a scrollable began
    * scrolling. Yields sheet interception for the rest of the touch stream.
    */
@@ -165,9 +321,10 @@ class TrueSheetCoordinatorLayout(context: Context) :
       streamHorizontalLocked = false
       streamDirectionDecided = false
       streamGestureClaimed = false
-      streamHasGestureRoot = findDescendantAt(this, ev.rawX.toInt(), ev.rawY.toInt()) {
+      streamHasGestureRoot = findDescendantViewAt(this, ev.rawX.toInt(), ev.rawY.toInt()) {
         it.javaClass.name == GESTURE_HANDLER_ROOT_VIEW_CLASS
-      }
+      } != null
+      updateStreamTargetFlags(ev)
     }
 
     // Decide gesture direction on first significant movement of the stream.
@@ -189,6 +346,8 @@ class TrueSheetCoordinatorLayout(context: Context) :
       }
       return false
     }
+
+    if (streamScrollsIndependently) return false
 
     if (streamGestureClaimed) {
       if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
@@ -213,7 +372,7 @@ class TrueSheetCoordinatorLayout(context: Context) :
       scrollView.scrollY == 0 &&
       !scrollView.canScrollVertically(1)
 
-    if (cannotScroll) {
+    if (cannotScroll || streamSheetDraggable) {
       when (ev.action and MotionEvent.ACTION_MASK) {
         MotionEvent.ACTION_DOWN -> {
           dragging = false
@@ -263,5 +422,6 @@ class TrueSheetCoordinatorLayout(context: Context) :
   companion object {
     private const val GESTURE_HANDLER_ROOT_VIEW_CLASS = "com.swmansion.gesturehandler.react.RNGestureHandlerRootView"
     private const val GESTURE_CLAIM_SLOP_FACTOR = 3
+    private const val PULL_DOWN_THRESHOLD_DP = 24f
   }
 }

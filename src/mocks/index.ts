@@ -2,6 +2,7 @@ import React, { createElement, isValidElement, type ReactNode } from 'react';
 import { View, type ViewProps } from 'react-native';
 
 import type { TrueSheetProps, TrueSheetStaticMethods } from '../TrueSheet.types';
+import { TrueSheetBackground } from '../TrueSheetBackground';
 
 interface TrueSheetState {
   shouldRenderNativeView: boolean;
@@ -21,6 +22,8 @@ export class TrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
   );
   static resize = jest.fn((_name: string, _index: number) => Promise.resolve());
   static dismissAll = jest.fn((_animated?: boolean) => Promise.resolve());
+  static suspendAll = jest.fn(() => Promise.resolve());
+  static unsuspendAll = jest.fn(() => Promise.resolve());
 
   dismiss = jest.fn((_animated?: boolean) => Promise.resolve());
   dismissStack = jest.fn((_animated?: boolean) => Promise.resolve());
@@ -54,8 +57,15 @@ export class TrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
   }
 
   render() {
-    const { children, style } = this.props;
-    return React.createElement(View, { style }, this.renderHeader(), children, this.renderFooter());
+    const { children, style, background, backgroundStyle } = this.props;
+    return React.createElement(
+      View,
+      { style },
+      React.createElement(TrueSheetBackground, { background, backgroundStyle }),
+      this.renderHeader(),
+      children,
+      this.renderFooter()
+    );
   }
 }
 
@@ -63,6 +73,13 @@ export class TrueSheet extends React.Component<TrueSheetProps, TrueSheetState> {
  * Mock TrueSheetPeek component for testing.
  */
 export function TrueSheetPeek({ children, ...rest }: ViewProps) {
+  return React.createElement(View, rest, children);
+}
+
+/**
+ * Mock TrueSheetOverlay component for testing.
+ */
+export function TrueSheetOverlay({ children, ...rest }: ViewProps) {
   return React.createElement(View, rest, children);
 }
 
@@ -83,6 +100,8 @@ export function useTrueSheet(): TrueSheetStaticMethods {
     dismissStack: TrueSheet.dismissStack,
     resize: TrueSheet.resize,
     dismissAll: TrueSheet.dismissAll,
+    suspendAll: TrueSheet.suspendAll,
+    unsuspendAll: TrueSheet.unsuspendAll,
   };
 }
 

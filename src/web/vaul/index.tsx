@@ -5,13 +5,14 @@ import React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Presence } from '@radix-ui/react-presence';
 
-import { DrawerContext, useDrawerContext } from './context';
+import { DrawerContext, useDrawerContext, type DragEvent } from './context';
 import './style.css';
 
 import { isIOS, isMobileFirefox } from './browser';
 import {
   BORDER_RADIUS,
   CLOSE_THRESHOLD,
+  DISMISS_ATTEMPT_THRESHOLD,
   DRAG_CLASS,
   NESTED_DISPLACEMENT,
   SCROLL_LOCK_TIMEOUT,
@@ -19,12 +20,19 @@ import {
   VELOCITY_THRESHOLD,
   WINDOW_TOP_OFFSET,
 } from './constants';
-import { dampenValue, getTranslate, isVertical, reset, set } from './helpers';
-import type { DrawerDirection } from './types';
+import {
+  dampenValue,
+  getSnapPointTransform,
+  getTranslate,
+  isVertical,
+  reset,
+  set,
+} from './helpers';
+import type { DrawerDirection, KeyboardViewport } from './types';
 import { useComposedRefs } from './use-composed-refs';
 import { useControllableState } from './use-controllable-state';
 import { usePositionFixed } from './use-position-fixed';
-import { isInput, usePreventScroll } from './use-prevent-scroll';
+import { isInput, isScrollable, usePreventScroll } from './use-prevent-scroll';
 import { useScaleBackground } from './use-scale-background';
 import { useSnapPoints } from './use-snap-points';
 
@@ -93,6 +101,18 @@ export type DialogProps = {
    * @default true
    */
   dismissible?: boolean;
+  /**
+   * How far the drawer must be dragged past its first snap point to close.
+   * `'half'` closes past half of it, `'short'` on a short drag or any fling.
+   * @default 'half'
+   */
+  dismissThreshold?: 'half' | 'short';
+  /**
+   * Called when the user tries to close a non-dismissible drawer — dragging down
+   * at the first snap point, pressing escape, or tapping the handle of a
+   * single-snap-point drawer. Overlay clicks don't count, mirroring iOS.
+   */
+  onDismissAttempt?: () => void;
   /**
    * When `false` the drawer can't be dragged by the user. Programmatic snap-point
    * changes still animate. Defaults to `true`.
@@ -197,6 +217,19 @@ export type DialogProps = {
    * content (e.g. iPad-style form sheets).
    */
   onContentHeightChange?: (height: number) => void;
+  /**
+   * Overrides the measured content height used to resolve the 'auto' snap
+   * point. Used when the caller bounds the content to the visible sheet
+   * (e.g. a plugged scrollable) so the auto-size wrapper can't be measured
+   * from natural flow.
+   */
+  contentHeight?: number;
+  /**
+   * Lays the drawer out in the visual viewport above a soft keyboard. The
+   * wrapper and snap offsets fit the visible area, while fractional snap
+   * points keep scaling against the full layout height.
+   */
+  keyboardViewport?: KeyboardViewport;
 } & (WithFadeFromProps | WithoutFadeFromProps);
 
 export function Root({
@@ -211,6 +244,8 @@ export function Root({
   closeThreshold = CLOSE_THRESHOLD,
   scrollLockTimeout = SCROLL_LOCK_TIMEOUT,
   dismissible = true,
+  dismissThreshold = 'half',
+  onDismissAttempt,
   draggable = true,
   handleOnly = false,
   fadeFromIndex = snapPoints && snapPoints.length - 1,
@@ -239,6 +274,8 @@ export function Root({
   peekHeight,
   initialAnimated = true,
   onContentHeightChange,
+  contentHeight: contentHeightProp,
+  keyboardViewport,
 }: DialogProps) {
   const [isOpen = false, setIsOpen] = useControllableState({
     defaultProp: defaultOpen,
@@ -266,27 +303,34 @@ export function Root({
   const isAllowedToDrag = React.useRef<boolean>(false);
   const nestedOpenChangeTimer = React.useRef<NodeJS.Timeout | null>(null);
   const pointerStart = React.useRef(0);
+  const dismissAttempted = React.useRef(false);
   const keyboardIsOpen = React.useRef(false);
   const shouldAnimate = React.useRef(!defaultOpen);
+  const hasPresented = React.useRef(false);
   const previousDiffFromInitial = React.useRef(0);
   const drawerRef = React.useRef<HTMLDivElement>(null);
   const drawerHeightRef = React.useRef(drawerRef.current?.getBoundingClientRect().height || 0);
   const drawerWidthRef = React.useRef(drawerRef.current?.getBoundingClientRect().width || 0);
   const initialDrawerHeight = React.useRef(0);
-  const [contentHeight, setContentHeight] = React.useState(0);
+  const [measuredContentHeight, setContentHeight] = React.useState(0);
+  const contentHeight = contentHeightProp ?? measuredContentHeight;
 
   const onContentHeightChangeRef = React.useRef(onContentHeightChange);
   React.useEffect(() => {
     onContentHeightChangeRef.current = onContentHeightChange;
   });
   React.useEffect(() => {
-    onContentHeightChangeRef.current?.(contentHeight);
-  }, [contentHeight]);
+    onContentHeightChangeRef.current?.(measuredContentHeight);
+  }, [measuredContentHeight]);
 
-  const onSnapPointChange = React.useCallback((activeSnapPointIndex: number) => {
+  const onSnapPointChange = React.useCallback((activeSnapPointIndex: number, animated: boolean) => {
     // Change openTime ref when we reach the last snap point to prevent dragging for 500ms incase it's scrollable.
     if (snapPoints && activeSnapPointIndex === snapPointsOffset.length - 1)
       openTime.current = new Date();
+    // Instant snaps do not emit transition events for position tracking.
+    if (!animated && drawerRef.current) {
+      onPositionChangeRef.current?.(drawerRef.current.getBoundingClientRect().top);
+    }
   }, []);
 
   const {
@@ -315,6 +359,7 @@ export function Root({
     maxContentHeight,
     peekHeight,
     initialAnimated,
+    keyboardViewport,
   });
 
   usePreventScroll({
@@ -336,6 +381,44 @@ export function Root({
     preventScrollRestoration,
     noBodyStyles,
   });
+
+  // While the sheet itself is being dragged, scrollables in the touched chain
+  // are frozen (overflow: hidden). Touch browsers latch the scroll gesture at
+  // touchstart and ignore preventDefault once scrolling has started, so making
+  // the scroller non-scrollable mid-gesture is the only reliable way to keep
+  // the content from panning along with the sheet.
+  const frozenScrollablesRef = React.useRef<
+    { element: HTMLElement; overflowX: string; overflowY: string }[] | null
+  >(null);
+
+  function freezeScrollables(target: EventTarget) {
+    if (frozenScrollablesRef.current) return;
+    const frozen: { element: HTMLElement; overflowX: string; overflowY: string }[] = [];
+    let element = target instanceof HTMLElement ? target : null;
+    while (element && element !== drawerRef.current) {
+      if (isScrollable(element)) {
+        frozen.push({
+          element,
+          overflowX: element.style.overflowX,
+          overflowY: element.style.overflowY,
+        });
+        element.style.overflowX = 'hidden';
+        element.style.overflowY = 'hidden';
+      }
+      element = element.parentElement;
+    }
+    frozenScrollablesRef.current = frozen;
+  }
+
+  function unfreezeScrollables() {
+    const frozen = frozenScrollablesRef.current;
+    if (!frozen) return;
+    frozenScrollablesRef.current = null;
+    for (const { element, overflowX, overflowY } of frozen) {
+      element.style.overflowX = overflowX;
+      element.style.overflowY = overflowY;
+    }
+  }
 
   function getScale() {
     return (window.innerWidth - WINDOW_TOP_OFFSET) / window.innerWidth;
@@ -386,7 +469,16 @@ export function Root({
     }
 
     if (swipeAmount !== null) {
-      if (direction === 'bottom' ? swipeAmount > 0 : swipeAmount < 0) {
+      // Translated past the drag threshold → keep dragging. Below the last
+      // snap point the threshold is 0, so the sheet always wins over content
+      // scrolling. At the last snap point the threshold is its resting
+      // translate — which can still be > 0 when the max detent < 1 — so an
+      // at-rest sheet falls through to the scroll checks and content
+      // scrolling wins, matching native. Mid-drag/mid-animation the sheet is
+      // displaced past rest and still wins.
+      const atLastSnapPoint = snapPoints && activeSnapPointIndex === snapPoints.length - 1;
+      const restOffset = atLastSnapPoint ? (snapPointsOffset?.[activeSnapPointIndex!] ?? 0) : 0;
+      if (direction === 'bottom' ? swipeAmount > restOffset + 1 : swipeAmount < restOffset - 1) {
         return true;
       }
     }
@@ -396,13 +488,16 @@ export function Root({
       return false;
     }
 
-    // Disallow dragging if drawer was scrolled within `scrollLockTimeout`
+    // Disallow dragging if drawer was scrolled within `scrollLockTimeout`.
+    // Don't re-arm the timestamp here — a prevented drag attempt is not a
+    // scroll, and re-arming would keep the lock alive for as long as the
+    // finger moves, deadening the whole gesture instead of just the first
+    // `scrollLockTimeout` ms after the last real scroll.
     if (
       lastTimeDragPrevented.current &&
       date.getTime() - lastTimeDragPrevented.current.getTime() < scrollLockTimeout &&
       swipeAmount === 0
     ) {
-      lastTimeDragPrevented.current = date;
       return false;
     }
 
@@ -417,7 +512,11 @@ export function Root({
     while (element) {
       // Check if the element is scrollable
       if (element.scrollHeight > element.clientHeight) {
-        if (element.scrollTop !== 0) {
+        // `> 0`, not `!== 0`: Safari reports a negative scrollTop during the
+        // rubber-band bounce at the top — that's "at the top" for drag
+        // purposes, and treating it as scrolled would arm the scroll lock and
+        // delay the sheet drag until the bounce fully settles.
+        if (element.scrollTop > 0) {
           lastTimeDragPrevented.current = new Date();
 
           // The element is scrollable and not scrolled to the top, so don't drag
@@ -437,7 +536,7 @@ export function Root({
     return true;
   }
 
-  function onDrag(event: React.PointerEvent<HTMLDivElement>) {
+  function drag(event: DragEvent, pointerEvent?: React.PointerEvent<HTMLDivElement>) {
     if (!drawerRef.current) {
       return;
     }
@@ -454,7 +553,17 @@ export function Root({
       const noCloseSnapPointsPreCondition = snapPoints && !dismissible && !isDraggingInDirection;
 
       // Disallow dragging down to close when first snap point is the active one and dismissible prop is set to false.
-      if (noCloseSnapPointsPreCondition && activeSnapPointIndex === 0) return;
+      if (noCloseSnapPointsPreCondition && activeSnapPointIndex === 0) {
+        // The drawer stays put. Remember a deliberate pull that would otherwise
+        // have dragged it (content at its top) so release() can report it.
+        if (
+          -draggedDistance > DISMISS_ATTEMPT_THRESHOLD &&
+          (isAllowedToDrag.current || shouldDrag(event.target, isDraggingInDirection))
+        ) {
+          dismissAttempted.current = true;
+        }
+        return;
+      }
 
       // We need to capture last time when drag with scroll was triggered and have a timeout between
       const absDraggedDistance = Math.abs(draggedDistance);
@@ -480,10 +589,21 @@ export function Root({
         return;
       }
 
-      if (!isAllowedToDrag.current && !shouldDrag(event.target, isDraggingInDirection)) return;
-      drawerRef.current.classList.add(DRAG_CLASS);
-      // If shouldDrag gave true once after pressing down on the drawer, we set isAllowedToDrag to true and it will remain true until we let go, there's no reason to disable dragging mid way, ever, and that's the solution to it
-      isAllowedToDrag.current = true;
+      if (!isAllowedToDrag.current) {
+        if (!shouldDrag(event.target, isDraggingInDirection)) return;
+        drawerRef.current.classList.add(DRAG_CLASS);
+        // If shouldDrag gave true once after pressing down on the drawer, we set isAllowedToDrag to true and it will remain true until we let go, there's no reason to disable dragging mid way, ever, and that's the solution to it
+        isAllowedToDrag.current = true;
+        // Touch pans latched onto a scroller would keep scrolling the content
+        // along with the sheet drag — freeze them for the drag's duration.
+        if (event.pointerType !== 'mouse') freezeScrollables(event.target);
+        // Drag can engage mid-gesture (content scrolled back to its top under
+        // the same finger, or the scroll lock expiring). Re-anchor and start
+        // moving on the next tick so the sheet tracks the finger from here
+        // instead of jumping by the distance the gesture already consumed.
+        pointerStart.current = isVertical(direction) ? event.pageY : event.pageX;
+        return;
+      }
       set(drawerRef.current, {
         transition: 'none',
       });
@@ -492,7 +612,7 @@ export function Root({
         transition: 'none',
       });
 
-      onDragProp?.(event, percentageDragged);
+      if (pointerEvent) onDragProp?.(pointerEvent, percentageDragged);
 
       if (snapPoints) {
         onDragSnapPoints({ draggedDistance });
@@ -691,20 +811,46 @@ export function Root({
 
     drawerRef.current.classList.remove(DRAG_CLASS);
     isAllowedToDrag.current = false;
+    unfreezeScrollables();
     setIsDragging(false);
     dragEndTime.current = new Date();
   }
 
-  function onRelease(event: React.PointerEvent<HTMLDivElement> | null) {
+  function release(event: DragEvent | null, pointerEvent?: React.PointerEvent<HTMLDivElement>) {
     if (!isDragging || !drawerRef.current) return;
 
     drawerRef.current.classList.remove(DRAG_CLASS);
     isAllowedToDrag.current = false;
+    unfreezeScrollables();
     setIsDragging(false);
     dragEndTime.current = new Date();
+
+    if (dismissAttempted.current) {
+      dismissAttempted.current = false;
+      if (isOpen) onDismissAttempt?.();
+    }
+
+    // The press that started this "drag" may have dismissed the drawer (e.g. a
+    // back button acting on pointerdown). Snapping now would overwrite the
+    // dismiss transform that closeDrawer just wrote and freeze the sheet in
+    // place until it unmounts.
+    if (!isOpen) {
+      if (pointerEvent) onReleaseProp?.(pointerEvent, false);
+      return;
+    }
+
     const swipeAmount = getTranslate(drawerRef.current, direction);
 
-    if (!event || !shouldDrag(event.target, false) || !swipeAmount || Number.isNaN(swipeAmount))
+    // Drag overshoot below the lowest snap point translates the detached
+    // wrapper while the drawer stays pinned (see onDrag in use-snap-points) —
+    // common when a clamped 'auto' puts the lowest snap point at 0. Count the
+    // wrapper's translation as movement, or the release is swallowed and the
+    // sheet is left stuck at the overshoot position.
+    const wrapper = drawerRef.current.closest<HTMLElement>('[data-vaul-detached-wrapper]');
+    const wrapperSwipeAmount = wrapper ? getTranslate(wrapper, direction) : null;
+    const hasMoved = Boolean(swipeAmount) || Boolean(wrapperSwipeAmount);
+
+    if (!event || !shouldDrag(event.target, false) || !hasMoved || Number.isNaN(swipeAmount))
       return;
 
     if (dragStartTime.current === null) return;
@@ -729,21 +875,22 @@ export function Root({
         closeDrawer,
         velocity,
         dismissible,
+        dismissThreshold,
       });
-      onReleaseProp?.(event, true);
+      if (pointerEvent) onReleaseProp?.(pointerEvent, true);
       return;
     }
 
     // Moved upwards, don't do anything
     if (direction === 'bottom' || direction === 'right' ? distMoved > 0 : distMoved < 0) {
       resetDrawer();
-      onReleaseProp?.(event, true);
+      if (pointerEvent) onReleaseProp?.(pointerEvent, true);
       return;
     }
 
     if (velocity > VELOCITY_THRESHOLD) {
       closeDrawer();
-      onReleaseProp?.(event, false);
+      if (pointerEvent) onReleaseProp?.(pointerEvent, false);
       return;
     }
 
@@ -758,15 +905,15 @@ export function Root({
 
     const isHorizontalSwipe = direction === 'left' || direction === 'right';
     if (
-      Math.abs(swipeAmount) >=
+      Math.abs(swipeAmount ?? 0) >=
       (isHorizontalSwipe ? visibleDrawerWidth : visibleDrawerHeight) * closeThreshold
     ) {
       closeDrawer();
-      onReleaseProp?.(event, false);
+      if (pointerEvent) onReleaseProp?.(pointerEvent, false);
       return;
     }
 
-    onReleaseProp?.(event, true);
+    if (pointerEvent) onReleaseProp?.(pointerEvent, true);
     resetDrawer();
   }
 
@@ -876,10 +1023,15 @@ export function Root({
           overlayRef,
           onOpenChange,
           onPress,
-          onRelease,
-          onDrag,
+          onRelease: (event) => release(event, event ?? undefined),
+          onDrag: (event) => drag(event, event),
+          onTouchDrag: (event, pointerEvent) => drag(event, pointerEvent),
+          onTouchRelease: (event, pointerEvent) => release(event, pointerEvent),
           dismissible,
+          onDismissAttempt,
           shouldAnimate,
+          initialAnimated,
+          hasPresented,
           handleOnly,
           isOpen,
           isDragging,
@@ -905,6 +1057,7 @@ export function Root({
           detachedOffset: detached ? detachedOffset : 0,
           detachedRadius: detached ? detachedRadius : 0,
           detachedWrapperStyle,
+          keyboardViewport,
         }}
       >
         {children}
@@ -1021,6 +1174,8 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
       onPress,
       onRelease,
       onDrag,
+      onTouchDrag,
+      onTouchRelease,
       keyboardIsOpen,
       snapPointsOffset,
       activeSnapPointIndex,
@@ -1032,9 +1187,12 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
       snapPoints,
       setActiveSnapPoint,
       dismissible,
+      onDismissAttempt,
       container,
       handleOnly,
       shouldAnimate,
+      initialAnimated,
+      hasPresented,
       autoFocus,
       onPositionChangeRef,
       setContentHeight,
@@ -1042,6 +1200,7 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
       detachedOffset,
       detachedRadius,
       detachedWrapperStyle: detachedWrapperStyleProp,
+      keyboardViewport,
     } = useDrawerContext();
     // Always measure the inner wrapper's natural height. The drawer itself may
     // be styled to a fixed viewport height, so we measure an inner wrapper
@@ -1077,6 +1236,7 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
     const composedRef = useComposedRefs(ref, drawerRef);
     const pointerStartRef = React.useRef<{ x: number; y: number } | null>(null);
     const lastKnownPointerEventRef = React.useRef<React.PointerEvent<HTMLDivElement> | null>(null);
+    const continuingCanceledTouchRef = React.useRef(false);
     const wasBeyondThePointRef = React.useRef(false);
     const hasSnapPoints = snapPoints && snapPoints.length > 0;
     useScaleBackground();
@@ -1175,11 +1335,17 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
       // same detent). Without this, position goes stale mid-animation because
       // the drawer's `transitionrun` never fires.
       const onTransitionRun = (e: TransitionEvent) => {
-        if ((e.target === drawer || e.target === wrapper) && e.propertyName === 'transform')
+        if (
+          (e.target === drawer || e.target === wrapper) &&
+          (e.propertyName === 'transform' || e.propertyName === '--snap-point-height')
+        )
           state.start();
       };
       const onTransitionDone = (e: TransitionEvent) => {
-        if ((e.target === drawer || e.target === wrapper) && e.propertyName === 'transform')
+        if (
+          (e.target === drawer || e.target === wrapper) &&
+          (e.propertyName === 'transform' || e.propertyName === '--snap-point-height')
+        )
           state.stop();
       };
       const onAnimationStart = (e: AnimationEvent) => {
@@ -1237,14 +1403,19 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
     // with a bottom gap and rounded bottom corners; otherwise it sits flush.
     // Transform/transition are managed imperatively (via drag overshoot and the
     // dismiss effect) so React doesn't skip DOM writes for values it thinks it
-    // already owns.
+    // already owns. Above a soft keyboard the wrapper fits the visual viewport,
+    // which the full-height layout viewport extends behind.
     const wrapperStyle = React.useMemo<React.CSSProperties>(
       () => ({
         position: 'fixed',
-        top: 0,
         left: 0,
         right: 0,
-        bottom: detached ? detachedOffset : 0,
+        ...(keyboardViewport
+          ? {
+              top: keyboardViewport.top,
+              height: Math.max(0, keyboardViewport.height - (detached ? detachedOffset : 0)),
+            }
+          : { top: 0, bottom: detached ? detachedOffset : 0 }),
         overflow: 'hidden',
         contain: 'paint',
         pointerEvents: 'none',
@@ -1252,7 +1423,7 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
         borderBottomRightRadius: detached ? detachedRadius : 0,
         ...detachedWrapperStyleProp,
       }),
-      [detached, detachedOffset, detachedRadius, detachedWrapperStyleProp]
+      [detached, detachedOffset, detachedRadius, detachedWrapperStyleProp, keyboardViewport]
     );
 
     // Translate the wrapper off-screen on dismiss so the whole card slides out
@@ -1276,16 +1447,22 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
           wrapper.style.transform = `translate3d(0, ${viewportH}px, 0)`;
         } else if (isOpen && !wasOpenRef.current) {
           wrapper.style.transition = 'none';
-          wrapper.style.transform = `translate3d(0, ${viewportH}px, 0)`;
-          // eslint-disable-next-line no-void
-          void wrapper.offsetHeight;
-          wrapper.style.transition = transition;
+          if (hasPresented.current || initialAnimated) {
+            wrapper.style.transform = `translate3d(0, ${viewportH}px, 0)`;
+            // eslint-disable-next-line no-void
+            void wrapper.offsetHeight;
+            wrapper.style.transition = transition;
+          }
           wrapper.style.transform = 'translate3d(0, 0, 0)';
+          hasPresented.current = true;
         }
       }
       wasOpenRef.current = isOpen;
-    }, [isOpen, detached, drawerRef]);
+    }, [isOpen, detached, drawerRef, initialAnimated, hasPresented]);
 
+    // Subsequent snap writes belong to useSnapPoints. A React style update on
+    // release would overwrite the live drag value before its transition starts.
+    const initialSnapPointOffset = React.useRef(snapPointsOffset?.[activeSnapPointIndex ?? 0] ?? 0);
     const contentNode = (
       <DialogPrimitive.Content
         data-vaul-drawer-direction={direction}
@@ -1300,7 +1477,8 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
         style={
           snapPointsOffset && snapPointsOffset.length > 0
             ? ({
-                '--snap-point-height': `${snapPointsOffset[activeSnapPointIndex ?? 0]!}px`,
+                '--snap-point-height': `${initialSnapPointOffset.current}px`,
+                'transform': getSnapPointTransform(direction),
                 ...style,
                 'pointerEvents': 'auto',
               } as React.CSSProperties)
@@ -1309,6 +1487,7 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
         onPointerDown={(event) => {
           if (handleOnly) return;
           rest.onPointerDown?.(event);
+          continuingCanceledTouchRef.current = false;
           pointerStartRef.current = { x: event.pageX, y: event.pageY };
           onPress(event);
         }}
@@ -1362,6 +1541,8 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
               activeSnapPointIndex > 0
             ) {
               setActiveSnapPoint(snapPoints![0]!);
+            } else {
+              onDismissAttempt?.();
             }
           }
         }}
@@ -1395,13 +1576,67 @@ export const Content = React.forwardRef<HTMLDivElement, ContentProps>(
         }}
         onPointerUp={(event) => {
           rest.onPointerUp?.(event);
+          continuingCanceledTouchRef.current = false;
           pointerStartRef.current = null;
           wasBeyondThePointRef.current = false;
           onRelease(event);
         }}
+        onPointerCancel={(event) => {
+          rest.onPointerCancel?.(event);
+          if (
+            event.pointerType === 'touch' &&
+            snapPoints &&
+            activeSnapPointIndex === snapPoints.length - 1
+          ) {
+            continuingCanceledTouchRef.current = true;
+            return;
+          }
+          handleOnPointerUp(null);
+        }}
         onPointerOut={(event) => {
           rest.onPointerOut?.(event);
+          if (continuingCanceledTouchRef.current) return;
           handleOnPointerUp(lastKnownPointerEventRef.current);
+        }}
+        onTouchMove={(event) => {
+          rest.onTouchMove?.(event);
+          if (!continuingCanceledTouchRef.current) return;
+          const touch = event.touches[0];
+          if (!touch) return;
+          onTouchDrag(
+            {
+              target: event.target,
+              pageX: touch.pageX,
+              pageY: touch.pageY,
+              pointerType: 'touch',
+            },
+            lastKnownPointerEventRef.current ?? undefined
+          );
+        }}
+        onTouchEnd={(event) => {
+          rest.onTouchEnd?.(event);
+          if (!continuingCanceledTouchRef.current) return;
+          continuingCanceledTouchRef.current = false;
+          pointerStartRef.current = null;
+          wasBeyondThePointRef.current = false;
+          const touch = event.changedTouches[0];
+          onTouchRelease(
+            touch
+              ? {
+                  target: event.target,
+                  pageX: touch.pageX,
+                  pageY: touch.pageY,
+                  pointerType: 'touch',
+                }
+              : null,
+            lastKnownPointerEventRef.current ?? undefined
+          );
+        }}
+        onTouchCancel={(event) => {
+          rest.onTouchCancel?.(event);
+          if (!continuingCanceledTouchRef.current) return;
+          continuingCanceledTouchRef.current = false;
+          handleOnPointerUp(null);
         }}
         onContextMenu={(event) => {
           rest.onContextMenu?.(event);
@@ -1449,6 +1684,7 @@ export const Handle = React.forwardRef<HTMLDivElement, HandleProps>(
       activeSnapPoint,
       setActiveSnapPoint,
       dismissible,
+      onDismissAttempt,
       handleOnly,
       isOpen,
       onPress,
@@ -1489,6 +1725,12 @@ export const Handle = React.forwardRef<HTMLDivElement, HandleProps>(
 
       if (isLastSnapPoint && dismissible) {
         closeDrawer();
+        return;
+      }
+
+      // Mirrors native: a single-detent sheet's handle tap is a dismiss.
+      if (isLastSnapPoint && snapPoints.length === 1) {
+        onDismissAttempt?.();
         return;
       }
 

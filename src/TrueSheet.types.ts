@@ -1,6 +1,7 @@
-import type { ComponentType, ReactElement } from 'react';
+import type { Component, ComponentType, ReactElement, ReactNode, RefObject } from 'react';
 import type {
   ColorValue,
+  HostInstance,
   NativeSyntheticEvent,
   StyleProp,
   ViewProps,
@@ -36,6 +37,7 @@ export type WillPresentEvent = NativeSyntheticEvent<DetentInfoEventPayload>;
 export type DidPresentEvent = NativeSyntheticEvent<DetentInfoEventPayload>;
 export type WillDismissEvent = NativeSyntheticEvent<null>;
 export type DidDismissEvent = NativeSyntheticEvent<null>;
+export type DismissAttemptEvent = NativeSyntheticEvent<null>;
 export type DragBeginEvent = NativeSyntheticEvent<DetentInfoEventPayload>;
 export type DragChangeEvent = NativeSyntheticEvent<DetentInfoEventPayload>;
 export type DragEndEvent = NativeSyntheticEvent<DetentInfoEventPayload>;
@@ -89,6 +91,71 @@ export interface GrabberOptions {
 }
 
 /**
+ * Options for customizing (e.g. localizing) the accessibility strings
+ * announced by screen readers.
+ *
+ * On iOS, the grabber strings only apply when `grabberOptions` is provided.
+ * Without it, iOS uses the system grabber which is already localized.
+ */
+export interface AccessibilityOptions {
+  /**
+   * The accessibility label of the grabber.
+   *
+   * @default iOS: 'Sheet Grabber', Android: 'Drag handle'
+   */
+  grabberLabel?: string;
+  /**
+   * The accessibility hint of the grabber.
+   *
+   * @platform ios
+   * @default 'Double-tap to expand. Swipe up or down to resize the sheet'
+   */
+  grabberHint?: string;
+  /**
+   * The value announced when the sheet is at the last detent.
+   *
+   * @default 'Expanded'
+   */
+  expandedValue?: string;
+  /**
+   * The value announced when the sheet is at the first detent.
+   *
+   * @default 'Collapsed'
+   */
+  collapsedValue?: string;
+  /**
+   * The value announced when the sheet is at an intermediate detent.
+   * Supports `{index}` and `{count}` placeholders.
+   *
+   * @default 'Detent {index} of {count}'
+   */
+  detentValue?: string;
+  /**
+   * The label of the expand accessibility action.
+   *
+   * @platform android
+   * @default 'Expand'
+   */
+  expandActionLabel?: string;
+  /**
+   * The label of the collapse accessibility action.
+   *
+   * @platform android
+   * @default 'Collapse'
+   */
+  collapseActionLabel?: string;
+  /**
+   * The title announced when the sheet appears.
+   * Sets the accessibility pane title on Android and the
+   * hidden dialog title on Web.
+   *
+   * @platform android, web
+   * @default Android: 'Bottom sheet', Web: 'Sheet'
+   */
+  paneTitle?: string;
+}
+
+/**
  * Scroll edge effect style for iOS 26+.
  * Controls the blur/gradient overlay applied to scroll view edges.
  *
@@ -97,15 +164,61 @@ export interface GrabberOptions {
 export type ScrollEdgeEffect = 'automatic' | 'hard' | 'soft' | 'hidden';
 
 /**
+ * What the sheet insets the bottom of a plugged scrollable's content for.
+ * See `ScrollableOptions.contentInsetAdjustment`.
+ */
+export type ContentInsetAdjustment = 'automatic' | 'safe-area' | 'footer' | 'never';
+
+/**
  * Options for scrollable behavior.
  */
 export interface ScrollableOptions {
+  /**
+   * What the sheet insets the bottom of the scroll content for, so the last
+   * item clears whatever covers the scroll view's bottom edge.
+   *
+   * - `'automatic'`: The bottom safe-area inset while the content can scroll
+   *   (home indicator on iOS, navigation bar on Android), plus the height of
+   *   an `absolute` footer floating over the scroll view. The footer then
+   *   counts toward the `auto` detent so the content ends above it.
+   * - `'safe-area'`: The safe-area inset only — content scrolls under an
+   *   absolute footer.
+   * - `'footer'`: The absolute footer only — you pad for the safe area.
+   * - `'never'`: No inset — you pad the content yourself.
+   *
+   * The safe-area inset only applies while the sheet's `insetAdjustment` is
+   * `'automatic'`; a relative footer absorbs it instead. The footer inset is
+   * independent of `insetAdjustment` — it only covers the part of the footer
+   * overlapping the scroll view, and stacks with the keyboard inset while the
+   * footer rises above the keyboard.
+   *
+   * On iOS, the safe-area inset sets the scroll view's native
+   * [`contentInsetAdjustmentBehavior`](https://developer.apple.com/documentation/uikit/uiscrollview/contentinsetadjustmentbehavior)
+   * to `automatic` while it's plugged into the sheet; Android and Web apply
+   * the inset themselves.
+   *
+   * @default 'automatic'
+   */
+  contentInsetAdjustment?: ContentInsetAdjustment;
+
   /**
    * Extra offset when scrolling to the focused input when keyboard appears.
    *
    * @default 0
    */
   keyboardScrollOffset?: number;
+
+  /**
+   * Adjusts the bottom inset applied to the scrollable when the keyboard is shown.
+   * Positive values increase the inset; negative values reduce it.
+   * Pass `-insets.bottom` to cancel out safe-area padding already included in
+   * the content's `paddingBottom`.
+   * Does not affect the auto scroll of the focused input — it always targets
+   * the keyboard edge.
+   *
+   * @default 0
+   */
+  keyboardOffset?: number;
 
   /**
    * Whether scrolling the content expands the sheet to the next detent.
@@ -133,39 +246,89 @@ export interface ScrollableOptions {
 }
 
 /**
+ * Options for header behavior
+ */
+export interface HeaderOptions {
+  /**
+   * How the header participates in the sheet layout.
+   *
+   * - `'relative'`: The header takes up space above the content, and its height
+   *   is included in the `auto` detent calculation.
+   * - `'absolute'`: The header floats over the content, pinned to the top edge,
+   *   and is excluded from the `auto` detent calculation.
+   *
+   * @default 'relative'
+   */
+  position?: 'relative' | 'absolute';
+}
+
+/**
+ * Options for foldables. Applies while the device is half-open with a horizontal
+ * fold (tabletop). In book posture (vertical fold), iOS already keeps sheets on
+ * one panel — use `placement` to pick the side.
+ */
+export interface FoldOptions {
+  /**
+   * The detent that rests on the hinge in tabletop, so the sheet fills the panel
+   * below it. In any other posture the detent keeps its own value. Lower detents
+   * stay below it and higher ones above it, so the detents keep their order.
+   */
+  hingeDetentIndex?: number;
+
+  /**
+   * How the sheet treats the hinge in tabletop.
+   *
+   * - `'none'`: Detents are free to cross the hinge.
+   * - `'avoid'`: Caps every detent at the hinge, so the sheet never crosses it.
+   * - `'snap'`: Like `'avoid'`, and also moves the sheet to `hingeDetentIndex` when
+   *    the device enters tabletop, then back to its previous detent when it leaves,
+   *    unless the sheet was moved off the hinge in between.
+   *
+   * @default 'none'
+   */
+  hingeBehavior?: 'none' | 'avoid' | 'snap';
+}
+
+/**
  * Options for footer behavior
  */
 export interface FooterOptions {
   /**
-   * Adjusts how far the footer rises when the keyboard opens.
+   * How the footer participates in the sheet layout.
+   *
+   * - `'relative'`: The footer takes up space below the content, pinned to the
+   *   bottom edge. Its height is included in the `auto` detent calculation but
+   *   excluded from the `peek` detent (it's pushed off-screen at peek).
+   * - `'absolute'`: The footer floats over the content, pinned to the bottom
+   *   edge. Its height is excluded from the `auto` detent calculation but
+   *   included in the `peek` detent.
+   *
+   * @default 'relative'
+   */
+  position?: 'relative' | 'absolute';
+
+  /**
+   * Adjusts how far an `absolute` footer rises when the keyboard opens.
    * Positive values raise it higher; negative values reduce the rise.
    * Pass `-insets.bottom` to tuck the footer's safe-area padding behind the keyboard.
+   * A `relative` footer stays in the layout flow behind the keyboard, so this has no effect.
    *
    * @default 0
    */
   keyboardOffset?: number;
-}
 
-/**
- * Options for customizing the blur effect.
- * Only applies when `backgroundBlur` is set.
- *
- * @platform ios
- */
-export interface BlurOptions {
   /**
-   * The intensity of the blur effect (0-100).
-   * Uses system default if not provided.
-   */
-  intensity?: number;
-  /**
-   * Enables or disables user interaction on the blur view.
-   * Disabling this can help with visual artifacts (flash) on iOS 18+
-   * when touching the sheet content with blur enabled.
+   * Whether an `absolute` footer rises above the keyboard when it opens.
+   * Set to `false` to keep the footer pinned to the sheet's bottom edge behind the keyboard.
+   * With footer inset adjustment enabled, any uncovered portion still adds scroll padding
+   * and contributes to the expanded `auto` height.
+   * The pinned footer keeps its safe-area padding and ignores `keyboardOffset`.
+   * A `relative` footer never rises, so this has no effect.
    *
+   * @platform ios, android
    * @default true
    */
-  interaction?: boolean;
+  avoidKeyboard?: boolean;
 }
 
 /**
@@ -184,7 +347,21 @@ export type InsetAdjustment =
   | 'never';
 
 /**
- * Blur style mapped to native values in IOS.
+ * How far the sheet must be swiped down from its lowest detent to dismiss.
+ */
+export type DismissThreshold =
+  /**
+   * Past half of the lowest detent, or a quick flick. Matches iOS.
+   */
+  | 'half'
+  /**
+   * A short drag (56 dp) or any downward fling (125 dp/s),
+   * like Compose Material3's `ModalBottomSheet`.
+   */
+  | 'short';
+
+/**
+ * Blur style mapped to native values in iOS.
  *
  * @platform ios
  */
@@ -210,6 +387,11 @@ export type BackgroundBlur =
   | 'system-material-dark'
   | 'system-thick-material-dark'
   | 'system-chrome-material-dark';
+
+export type DetentBackground =
+  | string
+  | { color: ColorValue; blur?: never }
+  | { blur: BackgroundBlur; color?: never };
 
 /**
  * Supported Sheet detent.
@@ -285,6 +467,22 @@ export interface TrueSheetProps extends ViewProps {
   dimmed?: boolean;
 
   /**
+   * The color of the dim overlay behind the sheet.
+   * This is ignored if `dimmed` is set to `false`.
+   *
+   * @default '#000000'
+   */
+  dimColor?: ColorValue;
+
+  /**
+   * The maximum opacity of the dim overlay behind the sheet (0 to 1).
+   * This is ignored if `dimmed` is set to `false`.
+   *
+   * @default 0.5
+   */
+  dimOpacity?: number;
+
+  /**
    * Initially present the sheet, after mounting, at a given detent index.
    *
    * @note This property is only used during the initial mount.
@@ -301,6 +499,34 @@ export interface TrueSheetProps extends ViewProps {
   initialDetentAnimated?: boolean;
 
   /**
+   * While `true`, the sheet steps aside natively — dismissed on iOS, hidden on Android —
+   * without reporting a close. It stays logically presented, keeps its mounted content and
+   * remembered detent, and returns at that detent when set back to `false`. Use it to let a
+   * full-screen native modal present over an open sheet (the two share a presenter on iOS),
+   * then bring the sheet back when the modal is gone.
+   *
+   * @platform android
+   * @platform ios
+   * @default false
+   */
+  suspended?: boolean;
+
+  /**
+   * Specify whether the sheet content should mount lazily, on first presentation.
+   * Set to `false` to mount the content before presentation without presenting the sheet.
+   * Use this when content is not ready on the first render, then call `present()`
+   * after your readiness signal so auto detents measure the settled content.
+   *
+   * Content that requires window attachment to measure, such as SwiftUI-hosted views,
+   * still only measures during presentation.
+   *
+   * @platform android
+   * @platform ios
+   * @default true
+   */
+  lazy?: boolean;
+
+  /**
    * The detent index that the sheet should start to dim the background.
    * This is ignored if `dimmed` is set to `false`.
    *
@@ -310,10 +536,21 @@ export interface TrueSheetProps extends ViewProps {
 
   /**
    * Prevents interactive dismissal of the Sheet.
+   * Blocked attempts fire `onDismissAttempt`, so you can confirm before dismissing programmatically.
    *
    * @default true
    */
   dismissible?: boolean;
+
+  /**
+   * How far the sheet must be swiped down from its lowest detent to dismiss.
+   * Set to `'short'` to dismiss on a short drag or fling, like Compose Material3's sheet.
+   *
+   * @platform android
+   * @platform web
+   * @default 'half'
+   */
+  dismissThreshold?: DismissThreshold;
 
   /**
    * Enables or disables dragging the sheet to resize it.
@@ -326,8 +563,34 @@ export interface TrueSheetProps extends ViewProps {
   /**
    * Main sheet background color.
    * Uses system default when not provided.
+   *
+   * On supported iOS 26.1+ devices, uses a native color effect.
+   * `backgroundBlur` takes precedence on iOS.
+   * Use `backgroundStyle.backgroundColor` for an exact color or to tint glass or blur.
    */
   backgroundColor?: ColorValue;
+
+  /**
+   * Backgrounds matched to `detents` by index. Strings are color values.
+   * Null or missing entries inherit
+   * `backgroundColor`/`backgroundBlur`. iOS 26.1+ transitions natively.
+   * Other platforms cross-fade after passing the midpoint between detents.
+   * Blur entries use the sheet background on Android and Web.
+   */
+  detentBackgrounds?: (DetentBackground | null)[];
+
+  /**
+   * Custom background rendered behind the header, content, and footer.
+   * The wrapper fills the sheet and ignores touches.
+   * Size the element to fill it with `StyleSheet.absoluteFill`.
+   */
+  background?: ReactNode;
+
+  /**
+   * Style for the background wrapper. Only `backgroundColor` is supported.
+   * Use an opaque color for an exact color, or a translucent color to tint glass or blur.
+   */
+  backgroundStyle?: StyleProp<Pick<ViewStyle, 'backgroundColor'>>;
 
   /**
    * The sheet corner radius.
@@ -355,6 +618,12 @@ export interface TrueSheetProps extends ViewProps {
   grabberOptions?: GrabberOptions;
 
   /**
+   * Options for customizing (e.g. localizing) the accessibility strings
+   * announced by screen readers.
+   */
+  accessibilityOptions?: AccessibilityOptions;
+
+  /**
    * Controls the sheet presentation style on iPad and web (landscape/tablet).
    * - `'page'`: bottom-attached page sheet (full or readable width).
    * - `'form'`: centered floating form sheet (default form-sheet width).
@@ -368,19 +637,12 @@ export interface TrueSheetProps extends ViewProps {
 
   /**
    * The blur effect style on iOS.
-   * Blends with `backgroundColor` when provided.
+   * Takes precedence over `backgroundColor`.
+   * Use `backgroundStyle.backgroundColor` to tint the blur.
    *
    * @platform ios
    */
   backgroundBlur?: BackgroundBlur;
-
-  /**
-   * Options for customizing the blur effect.
-   * Only applies when `backgroundBlur` is set.
-   *
-   * @platform ios
-   */
-  blurOptions?: BlurOptions;
 
   /**
    * Overrides `large` or `100%` height.
@@ -397,27 +659,38 @@ export interface TrueSheetProps extends ViewProps {
   maxContentWidth?: number;
 
   /**
-   * Anchors the sheet to the specified horizontal edge.
+   * Horizontal placement of the sheet within the screen.
    *
-   * - `'center'`: Centers the sheet horizontally (default).
-   * - `'left'`: Anchors the sheet to the left edge.
-   * - `'right'`: Anchors the sheet to the right edge.
+   * - `'automatic'`: The system decides (default). Centered on Android, Web, and iOS 26 and below.
+   * - `'center'`: Centers the sheet horizontally.
+   * - `'leading'`: Places the sheet on the leading edge (left in LTR, right in RTL).
+   * - `'trailing'`: Places the sheet on the trailing edge (right in LTR, left in RTL).
+   *
+   * `'automatic'` and `'center'` only differ on iOS 27+, where they map to
+   * `UISheetPresentationController.preferredPlacement`.
    *
    * Ignored on phones in portrait orientation.
    *
-   * @default 'center'
+   * @default 'automatic'
    */
-  anchor?: 'left' | 'center' | 'right';
+  placement?: 'automatic' | 'leading' | 'center' | 'trailing';
 
   /**
    * The offset from the screen edge.
-   * Only applies when `anchor` is `'left'` or `'right'`.
+   * Only applies when `placement` is `'leading'` or `'trailing'`.
    *
    * @platform android
    * @platform web
    * @default 16
    */
-  anchorOffset?: number;
+  placementOffset?: number;
+
+  /**
+   * How the sheet behaves on a foldable.
+   *
+   * @platform ios 27.1+
+   */
+  foldOptions?: FoldOptions;
 
   /**
    * Controls how the sheet adjusts its height for system insets (safe area).
@@ -451,6 +724,11 @@ export interface TrueSheetProps extends ViewProps {
   headerStyle?: StyleProp<ViewStyle>;
 
   /**
+   * Options for header behavior.
+   */
+  headerOptions?: HeaderOptions;
+
+  /**
    * A component that floats at the bottom of the Sheet.
    */
   footer?: ComponentType<unknown> | ReactElement;
@@ -461,18 +739,33 @@ export interface TrueSheetProps extends ViewProps {
   footerStyle?: StyleProp<ViewStyle>;
 
   /**
-   * On iOS, automatically pins ScrollView or FlatList to fit within the sheet's available space.
-   * When enabled, the ScrollView's top edge will be pinned below any top sibling views,
-   * and its left, right, and bottom edges will be pinned to the container.
+   * A ref to the scrollable component (e.g. `ScrollView`, `FlatList`)
+   * rendered within the sheet content. Lists that expose an imperative handle
+   * (e.g. `LegendList`, `FlashList`) work too, through their
+   * `getScrollableNode()` or `getNativeScrollRef()`.
+   * Required for scrollable handling — nested scrolling, keyboard insets,
+   * and `auto` detent sizing are wired to this scrollable.
    *
-   * On Android, it adds additional style to the content for scrollable to work.
+   * Example:
+   * ```tsx
+   * const scrollableRef = useRef<ScrollView>(null)
    *
-   * @default false
+   * <TrueSheet scrollableRef={scrollableRef}>
+   *   <ScrollView ref={scrollableRef} />
+   * </TrueSheet>
+   * ```
    */
-  scrollable?: boolean;
+  scrollableRef?: RefObject<
+    | Component<unknown>
+    | HostInstance
+    | { getScrollableNode(): unknown }
+    | { getNativeScrollRef(): unknown }
+    | null
+  >;
 
   /**
    * Options for scrollable behavior.
+   * Applies to the scrollable provided via `scrollableRef`.
    */
   scrollableOptions?: ScrollableOptions;
 
@@ -525,13 +818,20 @@ export interface TrueSheetProps extends ViewProps {
   onDidDismiss?: (event: DidDismissEvent) => void;
 
   /**
+   * Called when the user tries to dismiss the sheet while `dismissible` is `false`,
+   * e.g. by dragging down or pressing back/escape. Tapping the dim does not count.
+   * The sheet stays presented. Confirm with the user, then call `dismiss()` to proceed.
+   */
+  onDismissAttempt?: (event: DismissAttemptEvent) => void;
+
+  /**
    * Called when the detent of the sheet has changed.
-   * Either by dragging or programatically.
+   * Either by dragging or programmatically.
    */
   onDetentChange?: (event: DetentChangeEvent) => void;
 
   /**
-   * Called when the sheet has began dragging.
+   * Called when the sheet has begun dragging.
    * Comes with the detent info.
    */
   onDragBegin?: (event: DragBeginEvent) => void;
@@ -668,4 +968,15 @@ export interface TrueSheetStaticMethods {
    * Dismiss every presented sheet, from the top of the stack downward.
    */
   dismissAll(animated?: boolean): Promise<void>;
+
+  /**
+   * Suspend every currently open sheet: each steps aside natively while staying
+   * logically presented. Sheets presented after this call are unaffected.
+   */
+  suspendAll(): Promise<void>;
+
+  /**
+   * Re-present the sheets captured by `suspendAll` at their remembered detents.
+   */
+  unsuspendAll(): Promise<void>;
 }

@@ -1,5 +1,6 @@
 package com.lodev09.truesheet.core
 
+import android.view.View
 import android.view.ViewGroup
 import com.lodev09.truesheet.TrueSheetView
 
@@ -12,23 +13,45 @@ object TrueSheetStackManager {
   private val presentedSheetStack = mutableListOf<TrueSheetView>()
 
   /**
-   * Gets the parent sheet at the given index, if any.
-   * Only returns a parent if it's in the same container.
-   * Must be called within synchronized block.
-   */
-  private fun getParentSheetAt(index: Int, rootContainer: ViewGroup?): TrueSheetView? {
-    if (index <= 0) return null
-    return presentedSheetStack[index - 1].takeIf { it.rootContainerView == rootContainer }
-  }
-
-  /**
-   * Returns the topmost presented and visible sheet.
+   * Returns the topmost presented and visible sheet, skipping sheets that are dismissing.
+   * A dismissing sheet can't parent a new one: its dim would suppress the child's own dim
+   * and then disappear with it, leaving the child undimmed.
    * Must be called within synchronized block.
    */
   private fun findTopmostSheet(): TrueSheetView? =
     presentedSheetStack.lastOrNull {
-      it.viewController.isPresented && it.viewController.isSheetVisible
+      it.viewController.run { isPresented && isSheetVisible && !isBeingDismissed }
     }
+
+  /**
+   * Returns the topmost sheet hidden by screen navigation that was presented from the same
+   * screen as the given sheet. Sheets presented on the covering screen must not parent to it,
+   * or the hidden sheet would receive focus and blur events while it can't be seen.
+   * Must be called within synchronized block.
+   */
+  private fun findScreenHiddenSheet(sheetView: TrueSheetView): TrueSheetView? {
+    val screenTag = RNScreensEventObserver.findPresenterScreenTag(sheetView)
+    if (screenTag == 0) return null
+
+    return presentedSheetStack.lastOrNull {
+      it.viewController.run { isPresented && wasHiddenByScreen && !isBeingDismissed } &&
+        it.screensEventObserver?.presenterScreenTag == screenTag
+    }
+  }
+
+  /**
+   * Points sheets stacked on the given sheet at its parent, so focus routing and dismissAll
+   * still reach them when it leaves the stack first (e.g. unmounted, or swapped in the same tick).
+   * Must be called within synchronized block.
+   */
+  private fun reparentChildren(sheetView: TrueSheetView) {
+    val parentSheetView = sheetView.viewController.parentSheetView
+    presentedSheetStack.forEach {
+      if (it !== sheetView && it.viewController.parentSheetView === sheetView) {
+        it.viewController.parentSheetView = parentSheetView
+      }
+    }
+  }
 
   /**
    * Registers a sheet in the stack and returns its parent sheet if any.
@@ -37,7 +60,8 @@ object TrueSheetStackManager {
   @JvmStatic
   fun registerSheet(sheetView: TrueSheetView): TrueSheetView? {
     synchronized(presentedSheetStack) {
-      val parentSheet = findTopmostSheet()?.takeIf { it.rootContainerView == sheetView.rootContainerView }
+      val parentSheet = (findTopmostSheet() ?: findScreenHiddenSheet(sheetView))
+        ?.takeIf { it.rootContainerView == sheetView.rootContainerView }
 
       if (!presentedSheetStack.contains(sheetView)) {
         presentedSheetStack.add(sheetView)
@@ -53,30 +77,30 @@ object TrueSheetStackManager {
   @JvmStatic
   fun unregisterSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
 
   /**
    * Updates parent sheet translation based on the child sheet's position.
-   * Only affects parent sheets in the same container.
    */
   @JvmStatic
   fun updateParentTranslation(sheetView: TrueSheetView) {
-    synchronized(presentedSheetStack) {
-      val index = presentedSheetStack.indexOf(sheetView)
-      val parentSheet = getParentSheetAt(index, sheetView.rootContainerView) ?: return
+    val parentSheet = sheetView.viewController.parentSheetView ?: return
 
-      // Post to ensure layout is complete before reading position
-      sheetView.viewController.post {
-        val childMinSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(0)
-        val childCurrentSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(
-          sheetView.viewController.currentDetentIndex
-        )
-        // Cap to minimum detent position
-        val childSheetTop = maxOf(childMinSheetTop, childCurrentSheetTop)
-        parentSheet.updateTranslationForChild(childSheetTop)
-      }
+    // Post to ensure layout is complete before reading position
+    sheetView.viewController.post {
+      // A suspended sheet doesn't push its parent down
+      if (sheetView.viewController.isSuspended) return@post
+
+      val childMinSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(0)
+      val childCurrentSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(
+        sheetView.viewController.currentDetentIndex
+      )
+      // Cap to minimum detent position
+      val childSheetTop = maxOf(childMinSheetTop, childCurrentSheetTop)
+      parentSheet.updateTranslationForChild(childSheetTop)
     }
   }
 
@@ -96,9 +120,20 @@ object TrueSheetStackManager {
     }
   }
 
+  /**
+   * Returns a snapshot of the presented sheets, bottom-most first.
+   */
+  @JvmStatic
+  fun getPresentedSheetsInStackOrder(): List<TrueSheetView> {
+    synchronized(presentedSheetStack) {
+      return presentedSheetStack.toList()
+    }
+  }
+
   @JvmStatic
   fun removeSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -111,25 +146,16 @@ object TrueSheetStackManager {
   }
 
   /**
-   * Gets the parent sheet of the given sheet, if any.
-   * Only returns a parent if it's in the same container.
-   */
-  @JvmStatic
-  fun getParentSheet(sheetView: TrueSheetView): TrueSheetView? {
-    synchronized(presentedSheetStack) {
-      val index = presentedSheetStack.indexOf(sheetView)
-      return getParentSheetAt(index, sheetView.rootContainerView)
-    }
-  }
-
-  /**
-   * Returns true if the given sheet is the topmost presented sheet in its container.
+   * Returns true if the given sheet is the topmost visible sheet in its container.
+   * A hidden (suspended) sheet above doesn't take the keyboard from the one below it.
    */
   @JvmStatic
   fun isTopmostSheet(sheetView: TrueSheetView): Boolean {
     synchronized(presentedSheetStack) {
       val rootContainer = sheetView.rootContainerView
-      return presentedSheetStack.lastOrNull { it.rootContainerView == rootContainer } == sheetView
+      return presentedSheetStack.lastOrNull {
+        it.rootContainerView == rootContainer && it.viewController.isSheetVisible
+      } == sheetView
     }
   }
 
@@ -141,6 +167,57 @@ object TrueSheetStackManager {
     synchronized(presentedSheetStack) {
       return findTopmostSheet()
     }
+  }
+
+  private val savedBackgroundImportance = HashMap<View, Int>()
+
+  /**
+   * Hides views behind the topmost dimmed (modal) sheet from accessibility,
+   * mirroring BottomSheetDialog behavior. Sheets live in the same window as
+   * the app content, so without this TalkBack can traverse behind the sheet.
+   *
+   * Derived from the current stack state and idempotent — call whenever a
+   * sheet presents, dismisses, settles, or changes its dim state.
+   */
+  @JvmStatic
+  fun updateBackgroundAccessibility() {
+    synchronized(presentedSheetStack) {
+      val topDimmedIndex = presentedSheetStack.indexOfLast {
+        it.viewController.run { isPresented && isSheetVisible && !isBeingDismissed && isDimmedAtCurrentDetent }
+      }
+      val topDimmed = presentedSheetStack.getOrNull(topDimmedIndex)
+      val root = topDimmed?.viewController?.coordinatorLayout?.parent as? ViewGroup
+
+      if (root == null) {
+        restoreBackgroundAccessibility()
+        return
+      }
+
+      // The dimmed sheet, any sheets above it, and overlays (rendered above every sheet) stay accessible
+      val accessibleCoordinators = presentedSheetStack
+        .subList(topDimmedIndex, presentedSheetStack.size)
+        .mapNotNull { it.viewController.coordinatorLayout }
+        .toSet()
+
+      for (i in 0 until root.childCount) {
+        val child = root.getChildAt(i)
+        if (child in accessibleCoordinators || child is TrueSheetOverlayRootView) {
+          savedBackgroundImportance.remove(child)?.let { child.importantForAccessibility = it }
+          continue
+        }
+        if (!savedBackgroundImportance.containsKey(child)) {
+          savedBackgroundImportance[child] = child.importantForAccessibility
+        }
+        child.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+      }
+    }
+  }
+
+  private fun restoreBackgroundAccessibility() {
+    savedBackgroundImportance.forEach { (view, importance) ->
+      view.importantForAccessibility = importance
+    }
+    savedBackgroundImportance.clear()
   }
 
   /**

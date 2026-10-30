@@ -9,12 +9,15 @@
 #import "TrueSheetViewController.h"
 #import "TrueSheetContainerView.h"
 #import "TrueSheetContentView.h"
+#import "TrueSheetOverlayView.h"
 #import "core/TrueSheetBlurView.h"
 #import "core/TrueSheetDetentCalculator.h"
+#import "core/TrueSheetDimView.h"
 #import "core/TrueSheetGrabberView.h"
 #import "utils/BlurUtil.h"
 #import "utils/GestureUtil.h"
 #import "utils/PlatformUtil.h"
+#import "utils/UIView+FirstResponder.h"
 #import "utils/WindowUtil.h"
 
 #import <React/RCTLog.h>
@@ -40,11 +43,20 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 @interface TrueSheetViewController ()
 
 - (UIViewController *)accessibilityPresentingViewController;
+- (void)setupTransitionTracker;
+- (void)settleAtDetentIndex:(NSInteger)index debug:(NSString *)debug;
+- (void)settleWhenIdleWithDebug:(NSString *)debug;
 - (void)restoreWindowAccessibilityElements;
 - (void)setSheetAccessibilityElementsHidden:(BOOL)hidden;
 - (void)setAccessibilityContentElement:(UIView *)contentView;
+- (NSArray *)accessibilityGrabberElements;
 - (void)endInteractiveDismissState;
-- (void)emitInteractivePosition;
+- (void)updateHingeState;
+- (void)correctHingeOffsetForIndex:(NSInteger)index;
+- (CGFloat)tabletopHingeEdge;
+- (CGFloat)hingeOffsetForHeight:(CGFloat)height;
+- (void)verifyDimmingAfterPresentation;
+- (void)removeFallbackDimView;
 - (void)animateInteractiveContainerToTransform:(CGAffineTransform)transform
                                       duration:(NSTimeInterval)duration
                           allowUserInteraction:(BOOL)allowUserInteraction
@@ -52,36 +64,91 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 @end
 
+// VoiceOver delivers the two-finger Z (escape) gesture by walking up the view
+// hierarchy from the focused element, so the sheet's root view handles it.
+@interface TrueSheetControllerView : UIView
+@property (nonatomic, weak) TrueSheetViewController *controller;
+@end
+
+@implementation TrueSheetControllerView
+
+- (BOOL)accessibilityPerformEscape {
+  return [self.controller accessibilityPerformEscape];
+}
+
+@end
+
 @implementation TrueSheetViewController {
   TrueSheetPositionState _lastEmittedPositionState;
-  CGFloat _lastWidth;
+  CGSize _lastReportedSize;
+  // Net of the footer's baked-in inset, snapshotted together: the inset updates
+  // with the footer's layout, but a size change mid-present is deferred to
+  // didPresent, so subtracting it live pairs a new inset with a stale height.
+  CGFloat _autoDetentHeight;
+  CGFloat _peekDetentHeight;
   NSInteger _pendingDetentIndex;
+  NSUInteger _pendingDetentGeneration;
+  NSUInteger _settleGeneration;
+  NSInteger _displayedBackgroundIndex;
+  BOOL _usesBackgroundEffects;
+  BOOL _refusedPanDismiss;
+
+  // Present/dismiss tracking: a display link scoped to the transition
+  // coordinator — started alongside the transition, stopped in its completion.
+  CADisplayLink *_transitionLink;
+  BOOL _isTransitioning;
+  // Where the sheet rests during the transition: the target on present, the start on dismiss
+  CGFloat _transitionRestPosition;
+
   BOOL _pendingContentSizeChange;
   BOOL _pendingDetentsChange;
-
-  CADisplayLink *_transitioningTimer;
-  UIView *_transitionFakeView;
   BOOL _isDragging;
-  BOOL _isTransitioning;
-  BOOL _isTransitionSnapping;
-  BOOL _isTrackingPositionFromLayout;
   BOOL _isWillDismissEmitted;
+
+  // Last bottom safe area observed while presented — reused as the estimate
+  // for the next present (beats the float-threshold guess for re-presents).
+  BOOL _hasObservedBottomInset;
+  CGFloat _observedBottomInset;
+  BOOL _isRefreshingSafeArea;
 
   BOOL _isInteractiveDismiss;
   CGFloat _interactiveStartPosition;
   UIView *_interactiveContainerView;
-  CADisplayLink *_interactivePositionLink;
   NSUInteger _interactiveGeneration;
+  CADisplayLink *_interactivePositionLink;
 
   __weak TrueSheetViewController *_parentSheetController;
+  __weak UIView *_presenterFirstResponder;
 
   UIView *_anchorView;
 
   __weak UIWindow *_accessibilityWindow;
+  NSTimer *_overlayDismissalTimer;
+  BOOL _appliedAccessibilityFooterElements;
 
   TrueSheetBlurView *_blurView;
   TrueSheetGrabberView *_grabberView;
   TrueSheetDetentCalculator *_detentCalculator;
+  TrueSheetDimView *_dimView;
+
+  // Stands in for a UIKit dim that failed to appear (see verifyDimmingAfterPresentation)
+  TrueSheetDimView *_fallbackDimView;
+  NSUInteger _dimmingRepairGeneration;
+
+  // Orphan teardown (see orphanedAfterUnmount)
+  id<UIViewControllerTransitionCoordinator> _orphanTransitionCoordinator;
+  BOOL _orphanDismissRequested;
+
+  // Foldable hinge (iOS 27.1+). Tabletop resolves on demand from the window's
+  // division region; these track the last applied posture to detect changes.
+  BOOL _hingeStateKnown;
+  CGFloat _hingeEdge;
+  NSInteger _hingeRestoreIndex;
+  NSInteger _hingeCorrections;
+  // Offset learned at the hinge, shared by every hinge-placed detent
+  CGFloat _hingeOffset;
+  // Offset each hinge-placed detent last resolved with, checked on settle
+  NSMutableDictionary<NSNumber *, NSNumber *> *_hingeOffsets;
 }
 
 #pragma mark - Initialization
@@ -89,6 +156,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 - (instancetype)init {
   if (self = [super initWithNibName:nil bundle:nil]) {
     _detents = @[ @0.5, @1 ];
+    _detentBackgrounds = @[];
+    _displayedBackgroundIndex = 0;
     _contentHeight = @(0);
     _headerHeight = @(0);
     _footerHeight = @(0);
@@ -96,34 +165,43 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     _grabber = YES;
     _draggable = YES;
     _scrollingExpandsSheet = YES;
+    _footerAvoidsKeyboard = YES;
     _dismissible = YES;
     _dimmed = YES;
+    _dimColor = nil;
+    _dimOpacity = nil;
     _dimmedDetentIndex = @(0);
     _presentation = facebook::react::TrueSheetViewPresentation::Page;
     _lastEmittedPositionState = (TrueSheetPositionState){0, 0, 0};
     _isDragging = NO;
     _isPresented = NO;
-    _isTransitioning = NO;
     _isWillDismissEmitted = NO;
+    _isTransitioning = NO;
     _pendingContentSizeChange = NO;
+    _pendingDetentsChange = NO;
     _activeDetentIndex = -1;
     _pendingDetentIndex = -1;
 
-    _transitionFakeView = [UIView new];
-    _isTrackingPositionFromLayout = NO;
-
-    _blurInteraction = YES;
     _insetAdjustment = TrueSheetViewInsetAdjustment::Automatic;
+    _hingeRestoreIndex = -1;
+    _hingeOffsets = [NSMutableDictionary dictionary];
     _detentCalculator = [[TrueSheetDetentCalculator alloc] init];
     _detentCalculator.delegate = self;
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(overlayWindowDidChange)
+                                                 name:TrueSheetOverlayWindowDidChangeNotification
+                                               object:nil];
   }
   return self;
 }
 
 - (void)dealloc {
+  [_fallbackDimView removeFromSuperview];
   [self restoreWindowAccessibilityElements];
-  [_transitioningTimer invalidate];
-  _transitioningTimer = nil;
+  [_overlayDismissalTimer invalidate];
+  [_transitionLink invalidate];
+  _transitionLink = nil;
   [_interactivePositionLink invalidate];
   _interactivePositionLink = nil;
   [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -142,6 +220,13 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   return self.presentedViewController == nil;
 }
 
+// YES while a child controller is stacked on top (e.g. a nested sheet) —
+// UIKit's push-back scaling mutates the frame while the sheet is backgrounded.
+- (BOOL)isStackedBehindChild {
+  UIViewController *presented = self.presentedViewController;
+  return presented != nil && !presented.isBeingDismissed;
+}
+
 - (UIView *)presentedView {
   return self.sheet.presentedView;
 }
@@ -151,9 +236,72 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   return presentedView ? presentedView.frame.origin.y : 0.0;
 }
 
+// YES when any layer from the presented view up to the window has in-flight
+// animations (detent snap, present/dismiss transition, container settle).
+- (BOOL)isPresentedViewAnimating {
+  for (CALayer *layer = self.presentedView.layer; layer; layer = layer.superlayer) {
+    if (layer.animationKeys.count > 0) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+/**
+ * The sheet's live on-screen position. At rest and during drags (direct frame
+ * sets) this is the model position; during animations it adds the
+ * presentation-vs-model delta measured in window space, so ancestor animations
+ * compose and persistent transforms (e.g. floating-sheet inset) cancel out.
+ */
+- (CGFloat)livePosition {
+  UIView *presentedView = self.presentedView;
+  UIWindow *window = presentedView.window;
+  UIView *containerView = self.sheet.containerView;
+
+  // Direct (non-animated) translation applied during an interactive nav dismiss.
+  CGFloat containerTy = containerView ? containerView.transform.ty : 0;
+
+  if (!presentedView || !window || !self.isPresentedViewAnimating) {
+    return self.currentPosition + containerTy;
+  }
+
+  CALayer *modelLayer = presentedView.layer;
+  CALayer *presentationLayer = modelLayer.presentationLayer;
+  CALayer *rootModel = window.layer;
+  CALayer *rootPresentation = rootModel.presentationLayer;
+  if (!presentationLayer || !rootPresentation) {
+    return self.currentPosition + containerTy;
+  }
+
+  CGFloat modelY = [modelLayer convertPoint:CGPointZero toLayer:rootModel].y;
+  CGFloat presentationY = [presentationLayer convertPoint:CGPointZero toLayer:rootPresentation].y;
+  return self.currentPosition + (presentationY - modelY) + containerTy;
+}
+
+// Some callers run before this controller's view is attached (e.g. mid-presentation
+// detent resolution), so fall back to the presenter's window.
+- (UIWindow *)hostWindow {
+  return self.view.window ?: self.presentingViewController.view.window;
+}
+
 - (CGFloat)screenHeight {
-  UIWindow *window = self.view.window;
+  // In a windowed iPad app (Stage Manager, iPadOS 26 windowing) the window can be shorter than
+  // UIScreen.mainScreen, so prefer the window's height.
+  UIWindow *window = self.hostWindow;
   return window ? window.bounds.size.height : UIScreen.mainScreen.bounds.size.height;
+}
+
+// Gap UIKit leaves between a floating sheet (iOS 26+) and the screen's bottom edge
+static const CGFloat TrueSheetFloatingSheetInset = 8;
+
+// Largest resolved detent UIKit floats on iOS 26+. A floating sheet gets no
+// bottom safe-area inset; anything taller is edge-attached and gets it added.
+static const CGFloat TrueSheetFloatingDetentMaxHeight = 100;
+
+// Only phone sheets absorb the bottom safe-area inset — non-phone idioms
+// (iPad form sheets) are inset from the screen edge by UIKit.
+static BOOL TrueSheetIsPhoneIdiom(void) {
+  return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone;
 }
 
 - (CGFloat)detentBottomAdjustmentForHeight:(CGFloat)height {
@@ -161,14 +309,25 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     return 0;
   }
 
-  if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPhone) {
+  CGFloat inset = [self bottomSafeAreaForHeight:height];
+  if (@available(iOS 26.0, *)) {
+    // Subtracting the full inset can resolve the detent small enough to float,
+    // which drops the inset and leaves the sheet shorter than its content.
+    // Keep it edge-attached instead.
+    return fmin(inset, fmax(0, height - TrueSheetFloatingDetentMaxHeight - 1));
+  }
+
+  return inset;
+}
+
+- (CGFloat)bottomSafeAreaForHeight:(CGFloat)height {
+  if (!TrueSheetIsPhoneIdiom()) {
     return 0;
   }
 
-  // On iOS 26+, returns 0 for small detents (height <= 150)
-  // Floating sheets don't need adjustment
+  // Floating sheets (iOS 26+) get no bottom inset
   if (@available(iOS 26.0, *)) {
-    if (height <= 150) {
+    if (height <= TrueSheetFloatingDetentMaxHeight) {
       return 0;
     }
   }
@@ -177,7 +336,124 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   return window ? window.safeAreaInsets.bottom : 0;
 }
 
+/**
+ * Largest height the sheet can reach across its configured detents, excluding
+ * the inset currently baked into the footer's height. Basis for the footer's
+ * inset absorption so it follows the same rule as bottomSafeAreaForHeight: —
+ * a sheet that only ever floats (small detents on iOS 26) keeps its footer
+ * unpadded.
+ */
+- (CGFloat)maxNaturalDetentHeight {
+  CGFloat maxHeight = 0;
+
+  for (id detent in self.detents) {
+    if (![detent isKindOfClass:[NSNumber class]]) {
+      continue;
+    }
+
+    CGFloat value = [detent doubleValue];
+    CGFloat height = 0;
+    if (value == -1) {
+      height = [_detentCalculator autoHeightForKeyboardHeight:0] - [self autoDetentBottomInset];
+    } else if (value == -2) {
+      height = [_detentCalculator peekHeight] - [self peekDetentBottomInset];
+    } else if (value > 0 && value <= 1) {
+      height = value * self.screenHeight;
+    }
+    maxHeight = fmax(maxHeight, height);
+  }
+
+  if (self.maxContentHeight) {
+    maxHeight = fmin(maxHeight, [self.maxContentHeight floatValue]);
+  }
+
+  return maxHeight > 0 ? maxHeight : self.screenHeight;
+}
+
+// The inset the footer absorbs as padding.
+- (CGFloat)footerBottomInset {
+  if (_insetAdjustment != TrueSheetViewInsetAdjustment::Automatic) {
+    return 0;
+  }
+
+  // Early out so the maxNaturalDetentHeight fallback below doesn't run per
+  // layout pass on iPad only to be zeroed by bottomSafeAreaForHeight:.
+  if (!TrueSheetIsPhoneIdiom()) {
+    return 0;
+  }
+
+  // Once laid out, the sheet's own safe area is the authority — it reflects
+  // UIKit's actual float/anchored decision (a floating sheet gets 0), where
+  // bottomSafeAreaForHeight: can only guess the float threshold. Guessing
+  // wrong leaves the safe-area region unfilled (gap) or double-padded.
+  UIView *view = self.viewIfLoaded;
+  if (view.window) {
+    // Mid-present, hold the expected inset over a stale zero so the footer
+    // doesn't shrink and regrow — viewDidAppear forces the real value.
+    if (!_isPresented && [self hasStaleBottomSafeArea]) {
+      return [self bottomSafeAreaForHeight:view.bounds.size.height];
+    }
+
+    _hasObservedBottomInset = YES;
+    _observedBottomInset = view.safeAreaInsets.bottom;
+    return _observedBottomInset;
+  }
+
+  // Off-window while presented (e.g. hidden behind a native screen): the last
+  // observed value is this sheet's own truth — prefer it over the
+  // float-threshold guess. Cleared on dismiss so a re-present observes fresh
+  // geometry (rotation or detent changes while dismissed would stale it).
+  if (_hasObservedBottomInset) {
+    return _observedBottomInset;
+  }
+
+  return [self bottomSafeAreaForHeight:[self maxNaturalDetentHeight]];
+}
+
+// Re-resolve alongside the keyboard animation as its overlap with the pinned
+// footer changes, including keyboard height changes while already visible.
+- (void)setKeyboardHeight:(CGFloat)keyboardHeight {
+  if (_keyboardHeight == keyboardHeight) {
+    return;
+  }
+  _keyboardHeight = keyboardHeight;
+
+  if (_footerInsetAdjustment && !_footerAvoidsKeyboard && self.isPresented) {
+    [self setupSheetDetentsForSizeChange];
+  }
+}
+
+/**
+ * Bottom inset excluded from the auto detent. A relative footer (or an
+ * absolute one padding the scrollable) owns the sheet's bottom edge and
+ * carries the inset in its height (see footerBottomInset) — subtract exactly
+ * what was baked in so UIKit's own safe-area layout doesn't double it.
+ */
+- (CGFloat)autoDetentBottomInset {
+  if ((_absoluteFooter && !self.footerInsetAdjustment) || [self.footerHeight floatValue] <= 0) {
+    return 0;
+  }
+
+  return _appliedFooterBottomInset;
+}
+
+/**
+ * Bottom inset excluded from the peek detent. An absolute footer counts
+ * toward the peek height and carries the inset in its height — subtract
+ * exactly what was baked in so it isn't doubled.
+ */
+- (CGFloat)peekDetentBottomInset {
+  if (!_absoluteFooter || [self.footerHeight floatValue] <= 0) {
+    return 0;
+  }
+
+  return _appliedFooterBottomInset;
+}
+
 - (BOOL)isDesignCompatibilityMode {
+  if (@available(iOS 27.0, *)) {
+    return NO;
+  }
   if (@available(iOS 26.0, *)) {
     NSNumber *value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIDesignRequiresCompatibility"];
     return value.boolValue;
@@ -214,6 +490,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 #pragma mark - View Lifecycle
 
+- (void)loadView {
+  TrueSheetControllerView *view = [[TrueSheetControllerView alloc] init];
+  view.controller = self;
+  self.view = view;
+}
+
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.view.autoresizingMask = UIViewAutoresizingFlexibleHeight | UIViewAutoresizingFlexibleWidth;
@@ -224,6 +506,244 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   _grabberView = [[TrueSheetGrabberView alloc] init];
   _grabberView.hidden = YES;
   [_grabberView addToView:self.view];
+
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(27_1)
+  if (@available(iOS 27.1, *)) {
+    __weak __typeof(self) weakSelf = self;
+    UIHingeInteraction *hingeInteraction =
+      [[UIHingeInteraction alloc] initWithUpdateHandler:^(UIHingeInteraction *_, UIHingeInteractionUpdate *__) {
+        // Next run loop, so the division region reflects the new posture
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [weakSelf updateHingeState];
+        });
+      }];
+    [self.view addInteraction:hingeInteraction];
+  }
+#endif
+}
+
+#pragma mark - Custom Dimming
+
+// UISheetPresentationController has no API for the dim's color or opacity, so a custom
+// color/opacity turns the native dim off and fades in our own view behind the sheet.
+- (BOOL)useCustomDimming {
+  return self.dimmed && (self.dimColor != nil || self.dimOpacity != nil);
+}
+
+- (BOOL)isDimmedAtEveryDetent {
+  return self.dimmed && [self.dimmedDetentIndex integerValue] == 0;
+}
+
+// Like the system dim, fades in between the detent below `dimmedDetentIndex` and the dimmed detent.
+- (CGFloat)dimAlphaForIndex:(CGFloat)index {
+  if (![self useCustomDimming]) {
+    return 0;
+  }
+
+  CGFloat progress = index - [self.dimmedDetentIndex integerValue] + 1;
+  return fmax(0, fmin(1, progress));
+}
+
+// Present and dismiss fade the dim over the whole travel below the resting position.
+- (CGFloat)dimAlphaForPosition:(CGFloat)position index:(CGFloat)index {
+  if (!_isTransitioning || position <= _transitionRestPosition) {
+    return [self dimAlphaForIndex:index];
+  }
+
+  CGFloat travel = self.screenHeight - _transitionRestPosition;
+  CGFloat progress = travel > 0 ? fmax(0, (self.screenHeight - position) / travel) : 0;
+  return [self dimAlphaForIndex:[self interpolatedIndexForPosition:_transitionRestPosition]] * progress;
+}
+
+- (void)setupDimView {
+  UIView *container = self.presentationController.containerView;
+  if (!container || (!_dimView && ![self useCustomDimming])) {
+    return;
+  }
+
+  if (!_dimView) {
+    _dimView = [[TrueSheetDimView alloc] init];
+
+    __weak __typeof(self) weakSelf = self;
+    _dimView.onTap = ^{
+      [weakSelf handleDimViewTap];
+    };
+  }
+
+  // Keep opacity in the color so a transparent dim still receives touches.
+  UIColor *color = self.dimColor ?: [UIColor blackColor];
+  CGFloat opacity = self.dimOpacity ? [self.dimOpacity doubleValue] : 0.5;
+  _dimView.backgroundColor = [color colorWithAlphaComponent:CGColorGetAlpha(color.CGColor) * opacity];
+  [_dimView addToView:container];
+}
+
+- (void)handleDimViewTap {
+  if (self.dismissible) {
+    [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+  }
+}
+
+#pragma mark - Dimming Self-Heal
+
+// UIKit can bring a sheet up without its dimming view when the present lands
+// right after another dismissal on the same presenter chain (reproducible on
+// iOS 26). After presenting and on detent changes, check the system dim exists
+// whenever the policy wants one. If it's missing, nudge the policy through a
+// real undimmed → configured transition, and only as a last resort show our own.
+// Custom dimming turns the system dim off and never takes this path.
+
+- (BOOL)expectsSystemDimming {
+  if (!self.dimmed || [self useCustomDimming]) {
+    return NO;
+  }
+
+  NSInteger currentIndex = self.currentDetentIndex;
+  if (currentIndex < 0) {
+    return NO;
+  }
+
+  NSInteger dimmedIndex = [self.dimmedDetentIndex integerValue];
+  if (dimmedIndex <= 0) {
+    return YES;
+  }
+
+  if (@available(iOS 16.0, *)) {
+    // Past the last detent nothing is dimmed (see configuredLargestUndimmedDetentIdentifier)
+    return dimmedIndex < (NSInteger)self.detents.count && currentIndex >= dimmedIndex;
+  }
+  return NO;
+}
+
+- (BOOL)isDimmingView:(UIView *)view visibleInContainer:(UIView *)container {
+  CGFloat alpha = 1;
+  for (UIView *cursor = view; cursor; cursor = cursor.superview) {
+    if (cursor.isHidden) {
+      return NO;
+    }
+    alpha *= cursor.alpha;
+    if (cursor == container) {
+      break;
+    }
+  }
+
+  CALayer *presentationLayer = view.layer.presentationLayer;
+  if (presentationLayer) {
+    alpha *= presentationLayer.opacity;
+  }
+
+  return alpha > 0.01 && view.window && !CGRectIsEmpty(view.bounds);
+}
+
+// UIKit's dimming view is private, so it's matched by class name (read-only).
+// It never lives inside the sheet itself, so the React subtree is skipped.
+- (BOOL)findSystemDimmingViewInView:(UIView *)view container:(UIView *)container {
+  if (view == _fallbackDimView || view == _dimView || view == self.presentedView) {
+    return NO;
+  }
+
+  NSString *className = NSStringFromClass([view class]);
+  if ([className rangeOfString:@"Dimming" options:NSCaseInsensitiveSearch].location != NSNotFound &&
+      [self isDimmingView:view visibleInContainer:container]) {
+    return YES;
+  }
+
+  for (UIView *subview in view.subviews) {
+    if ([self findSystemDimmingViewInView:subview container:container]) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+- (BOOL)hasVisibleSystemDimmingView {
+  UIView *container = self.sheet.containerView;
+  return container && [self findSystemDimmingViewInView:container container:container];
+}
+
+// A newer check, a dismissal, or a child stacked on top aborts a repair in flight
+- (BOOL)canRepairDimmingForGeneration:(NSUInteger)generation {
+  return generation == _dimmingRepairGeneration && !self.isBeingDismissed && self.viewIfLoaded.window &&
+         self.presentingViewController.presentedViewController == self && !self.presentedViewController;
+}
+
+- (void)verifyDimmingAfterPresentation {
+  NSUInteger generation = ++_dimmingRepairGeneration;
+
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (![self canRepairDimmingForGeneration:generation]) {
+      return;
+    }
+
+    if (![self expectsSystemDimming] || [self hasVisibleSystemDimmingView]) {
+      [self removeFallbackDimView];
+      return;
+    }
+
+    UISheetPresentationController *sheet = self.sheet;
+    UISheetPresentationControllerDetentIdentifier undimmedIdentifier =
+      UISheetPresentationControllerDetentIdentifierLarge;
+    if (@available(iOS 16.0, *)) {
+      undimmedIdentifier = sheet.detents.lastObject.identifier ?: undimmedIdentifier;
+    }
+
+    [sheet animateChanges:^{
+      sheet.largestUndimmedDetentIdentifier = undimmedIdentifier;
+    }];
+
+    // Two separate updates — within one, the toggle coalesces to a no-op
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (![self canRepairDimmingForGeneration:generation]) {
+        return;
+      }
+
+      [sheet animateChanges:^{
+        sheet.largestUndimmedDetentIdentifier = [self configuredLargestUndimmedDetentIdentifier];
+      }];
+
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (![self canRepairDimmingForGeneration:generation]) {
+          return;
+        }
+
+        if ([self hasVisibleSystemDimmingView]) {
+          [self removeFallbackDimView];
+        } else if ([self isDimmedAtEveryDetent]) {
+          // A detent-dependent fallback would need the position tracker to
+          // drive its alpha to match UIKit mid-drag
+          [self showFallbackDimView];
+        }
+      });
+    });
+  });
+}
+
+- (void)showFallbackDimView {
+  UIView *container = self.presentationController.containerView;
+  if (!container) {
+    return;
+  }
+
+  if (!_fallbackDimView) {
+    _fallbackDimView = [[TrueSheetDimView alloc] init];
+    _fallbackDimView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.2];
+    _fallbackDimView.accessibilityElementsHidden = YES;
+
+    __weak __typeof(self) weakSelf = self;
+    _fallbackDimView.onTap = ^{
+      [weakSelf handleDimViewTap];
+    };
+    [_fallbackDimView addToView:container];
+  }
+
+  [UIView animateWithDuration:0.2
+                   animations:^{
+                     self->_fallbackDimView.alpha = 1;
+                   }];
+}
+
+- (void)removeFallbackDimView {
+  [_fallbackDimView removeFromSuperview];
+  _fallbackDimView = nil;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -237,6 +757,22 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       _parentSheetController = (TrueSheetViewController *)presenter;
       [_parentSheetController.delegate viewControllerWillBlur];
       [_parentSheetController setAccessibilityContentElement:self.accessibilityContentView ?: self.view];
+    }
+
+    [self setupDimView];
+
+    // A new presentation records the posture it starts in
+    _hingeStateKnown = NO;
+    _hingeRestoreIndex = -1;
+    _hingeOffset = 0;
+
+    // UIKit hides the presenter's keyboard under a sheet dimmed at every detent and
+    // brings it back on dismiss, but custom dimming leaves the native sheet undimmed.
+    if ([self useCustomDimming] && [self isDimmedAtEveryDetent]) {
+      UIView *firstResponder = [presenter.view findFirstResponder];
+      if ([firstResponder resignFirstResponder]) {
+        _presenterFirstResponder = firstResponder;
+      }
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -267,13 +803,49 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
       [self->_grabberView updateAccessibilityValueWithIndex:index detentCount:self->_detents.count];
       [self settleAtDetentIndex:index debug:@"did present"];
+
+      // Apply a posture change that happened while presenting
+      [self updateHingeState];
+
+      [self verifyDimmingAfterPresentation];
     });
 
     [self setupGestureRecognizer];
     _isPresented = YES;
+    [self refreshStaleBottomSafeArea];
   }
 
   [self setupAccessibilityContainer];
+  [self attemptOrphanTeardown];
+}
+
+/**
+ * A present that overlaps another transition (e.g. re-presenting while a
+ * native stack pops) can leave the root view's bottom safe area at zero, and
+ * UIKit doesn't recompute it until the sheet's frame next changes. Suspect a
+ * zero the presented height says shouldn't be there — a small floating sheet
+ * legitimately has none.
+ */
+- (BOOL)hasStaleBottomSafeArea {
+  UIView *view = self.viewIfLoaded;
+  return view.window && view.safeAreaInsets.bottom <= 0 && [self bottomSafeAreaForHeight:view.bounds.size.height] > 0;
+}
+
+// Toggling additionalSafeAreaInsets forces UIKit to recompute the safe area.
+// The toggle's intermediate value isn't reported, so the footer only sees the
+// settled one.
+- (void)refreshStaleBottomSafeArea {
+  if (![self hasStaleBottomSafeArea]) {
+    return;
+  }
+
+  _isRefreshingSafeArea = YES;
+  UIEdgeInsets insets = self.additionalSafeAreaInsets;
+  self.additionalSafeAreaInsets = UIEdgeInsetsMake(insets.top, insets.left, insets.bottom + 1, insets.right);
+  self.additionalSafeAreaInsets = insets;
+  _isRefreshingSafeArea = NO;
+
+  [self.delegate viewControllerSafeAreaInsetsDidChange];
 }
 
 - (void)setupAccessibilityContainer {
@@ -283,6 +855,43 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 
   [self setAccessibilityContentElement:contentView];
+}
+
+// Only the topmost sheet may refresh, or it would steal the window
+// accessibility override from the child presented over it.
+- (BOOL)canRefreshAccessibilityContainer {
+  return _isPresented && !_orphanedAfterUnmount && !self.isBeingDismissed && self.isTopmostPresentedController;
+}
+
+- (void)refreshAccessibilityContainer {
+  if (self.canRefreshAccessibilityContainer) {
+    [self setupAccessibilityContainer];
+  }
+}
+
+- (void)refreshAccessibilityContainerIfFooterChanged {
+  // Only a dimmed sheet's boundary depends on the footer
+  if (!_dimmed || !self.canRefreshAccessibilityContainer) {
+    return;
+  }
+
+  UIView *contentView = self.accessibilityContentView;
+  if (![contentView isKindOfClass:[TrueSheetContainerView class]] ||
+      [(TrueSheetContainerView *)contentView hasAccessibilityFooterElements] == _appliedAccessibilityFooterElements) {
+    return;
+  }
+
+  [self setAccessibilityContentElement:contentView];
+  UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
+}
+
+- (void)overlayWindowDidChange {
+  if (!self.canRefreshAccessibilityContainer) {
+    return;
+  }
+
+  [self setupAccessibilityContainer];
+  UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
 }
 
 - (UIViewController *)accessibilityPresentingViewController {
@@ -321,24 +930,56 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 }
 
+- (NSArray *)accessibilityGrabberElements {
+  if (_grabberView && !_grabberView.hidden) {
+    return @[ _grabberView ];
+  }
+
+  // The system grabber is an accessibility element UIKit adds to the presented view
+  // (a sibling of our root view). Expose it so VoiceOver can resize or dismiss with it.
+  // UIKit also keeps a transparent bottom grabber there, so skip invisible views.
+  NSMutableArray *elements = [NSMutableArray array];
+  for (UIView *subview in self.presentationController.presentedView.subviews) {
+    if (subview != self.view && subview.isAccessibilityElement && !subview.hidden && subview.alpha > 0) {
+      [elements addObject:subview];
+    }
+  }
+  return elements;
+}
+
+- (BOOL)accessibilityPerformEscape {
+  if (!_isPresented) {
+    return NO;
+  }
+
+  if (!self.dismissible) {
+    [self.delegate viewControllerDidAttemptDismiss];
+    return NO;
+  }
+
+  [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+  return YES;
+}
+
 - (void)setAccessibilityContentElement:(UIView *)contentView {
   BOOL hasAccessibilityFooterElements = [contentView isKindOfClass:[TrueSheetContainerView class]] &&
                                         [(TrueSheetContainerView *)contentView hasAccessibilityFooterElements];
   // Footer controls exposed as separate accessibility elements can be skipped
   // by XCTest when the presented sheet is a hard modal accessibility boundary.
   BOOL isAccessibilityModal = _dimmed && !hasAccessibilityFooterElements;
+  _appliedAccessibilityFooterElements = hasAccessibilityFooterElements;
 
   // At a hard modal boundary XCTest skips nested elements, so flatten the
   // container's children into the array. Otherwise expose the container itself:
   // its accessibilityElements getter recomputes live, so a footer/content subtree
   // that remounts (e.g. swapping a footer button on a state change) stays
   // discoverable instead of leaving this snapshot pointing at destroyed views.
-  NSArray *accessibilityElements;
+  NSMutableArray *accessibilityElements = [[self accessibilityGrabberElements] mutableCopy];
   if (isAccessibilityModal) {
     NSArray *contentElements = contentView.accessibilityElements;
-    accessibilityElements = contentElements.count > 0 ? contentElements : @[ contentView ];
+    [accessibilityElements addObjectsFromArray:contentElements.count > 0 ? contentElements : @[ contentView ]];
   } else {
-    accessibilityElements = @[ contentView ];
+    [accessibilityElements addObject:contentView];
   }
 
   self.view.isAccessibilityElement = NO;
@@ -350,6 +991,15 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     presentedView.isAccessibilityElement = NO;
     presentedView.accessibilityViewIsModal = isAccessibilityModal;
     presentedView.accessibilityElements = accessibilityElements;
+
+    // The system grabber is a sibling of our root view, so an escape performed while it
+    // is focused walks presentedView → window and never reaches TrueSheetControllerView.
+    if (@available(iOS 17.0, *)) {
+      __weak __typeof(self) weakSelf = self;
+      presentedView.accessibilityPerformEscapeBlock = ^BOOL {
+        return [weakSelf accessibilityPerformEscape];
+      };
+    }
 
     UIWindow *window = self.view.window;
     UIViewController *presentingViewController = [self accessibilityPresentingViewController];
@@ -365,8 +1015,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       }
       objc_setAssociatedObject(window, &TrueSheetAccessibilityWindowOwnerKey, [NSValue valueWithNonretainedObject:self],
         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-      window.accessibilityElements =
+      NSArray *sheetElements =
         isAccessibilityModal ? @[ presentedView ] : @[ presentingViewController.view, presentedView ];
+      // Overlays render above every sheet. Listed first, since accessibility
+      // hit testing takes the first element containing the point.
+      window.accessibilityElements =
+        [[TrueSheetOverlayView overlayContainersInWindow:window] arrayByAddingObjectsFromArray:sheetElements];
       return;
     }
   }
@@ -385,9 +1039,43 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   // override when it dismisses. Nested sheets claim their own override.
   if (![viewControllerToPresent isKindOfClass:[TrueSheetViewController class]]) {
     self.view.window.accessibilityElements = nil;
+
+    // Start watching once the overlay is up. Some overlays (e.g. PHPickerViewController)
+    // present asynchronously, so presentedViewController is still nil right after this,
+    // and a watch left over from a previous overlay would reclaim too early.
+    [_overlayDismissalTimer invalidate];
+    void (^presentCompletion)(void) = completion;
+    completion = ^{
+      [self reclaimAccessibilityWhenOverlayDismisses];
+      if (presentCompletion) {
+        presentCompletion();
+      }
+    };
   }
 
   [super presentViewController:viewControllerToPresent animated:flag completion:completion];
+}
+
+// The reclaim in -dismissViewControllerAnimated: only runs when the dismissal goes
+// through us. An overlay that dismisses itself (e.g. an image picker calling dismiss
+// on itself) or is swiped away skips it, and no other callback reaches us, so poll
+// until nothing is presented over us.
+- (void)reclaimAccessibilityWhenOverlayDismisses {
+  [_overlayDismissalTimer invalidate];
+
+  __weak __typeof(self) weakSelf = self;
+  _overlayDismissalTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                                           repeats:YES
+                                                             block:^(NSTimer *timer) {
+                                                               __typeof(self) strongSelf = weakSelf;
+                                                               if (strongSelf.presentedViewController) {
+                                                                 return;
+                                                               }
+
+                                                               [timer invalidate];
+                                                               [strongSelf refreshAccessibilityContainer];
+                                                               [strongSelf attemptOrphanTeardown];
+                                                             }];
 }
 
 - (void)dismissViewControllerAnimated:(BOOL)flag completion:(void (^)(void))completion {
@@ -399,8 +1087,10 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
                               // Reclaim the window accessibility override once nothing
                               // else is presented over us.
-                              if (self.isPresented && self.presentedViewController == nil) {
-                                [self setupAccessibilityContainer];
+                              if (self.presentedViewController == nil) {
+                                [self->_overlayDismissalTimer invalidate];
+                                [self refreshAccessibilityContainer];
+                                [self attemptOrphanTeardown];
                               }
                             }];
 }
@@ -412,6 +1102,13 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [self.delegate viewControllerWillBlur];
     [self.delegate viewControllerWillDismiss];
     [_parentSheetController.delegate viewControllerWillFocus];
+
+    // Restored once the dismiss commits, like UIKit's own keyboard preservation.
+    UIView *firstResponder = _presenterFirstResponder;
+    _presenterFirstResponder = nil;
+    if (!self.presentingViewController.isBeingDismissed) {
+      [firstResponder becomeFirstResponder];
+    }
   }
 }
 
@@ -420,6 +1117,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [self restoreWindowAccessibilityElements];
     _isPresented = NO;
     _isWillDismissEmitted = NO;
+    _hasObservedBottomInset = NO;
+
+    [_dimView removeFromSuperview];
+    _dimView = nil;
+    [self removeFallbackDimView];
 
     [_anchorView removeFromSuperview];
     _anchorView = nil;
@@ -427,6 +1129,9 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [_parentSheetController.delegate viewControllerDidFocus];
     [_parentSheetController setSheetAccessibilityElementsHidden:NO];
     [_parentSheetController setupAccessibilityContainer];
+    [_parentSheetController attemptOrphanTeardown];
+    // Dim repairs are skipped while a child sits on top
+    [_parentSheetController verifyDimmingAfterPresentation];
     _parentSheetController = nil;
 
     [self.delegate viewControllerDidBlur];
@@ -434,18 +1139,158 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 }
 
+#pragma mark - Orphan Teardown
+
+- (void)setOrphanedAfterUnmount:(BOOL)orphanedAfterUnmount {
+  _orphanedAfterUnmount = orphanedAfterUnmount;
+  if (!orphanedAfterUnmount) {
+    _orphanTransitionCoordinator = nil;
+    _orphanDismissRequested = NO;
+  }
+}
+
+// Retries once the controller's transition ends. NO when it has none to wait on.
+- (BOOL)retryOrphanTeardownAfterTransitionOf:(nullable UIViewController *)controller {
+  id<UIViewControllerTransitionCoordinator> coordinator = controller.transitionCoordinator;
+  if (!coordinator) {
+    return NO;
+  }
+  if (coordinator == _orphanTransitionCoordinator) {
+    return YES;
+  }
+
+  __weak __typeof(self) weakSelf = self;
+  __weak id<UIViewControllerTransitionCoordinator> weakCoordinator = coordinator;
+  BOOL queued =
+    [coordinator animateAlongsideTransition:nil
+                                 completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+                                   __typeof(self) strongSelf = weakSelf;
+                                   if (strongSelf && strongSelf->_orphanTransitionCoordinator == weakCoordinator) {
+                                     strongSelf->_orphanTransitionCoordinator = nil;
+                                   }
+                                   dispatch_async(dispatch_get_main_queue(), ^{
+                                     [weakSelf attemptOrphanTeardown];
+                                   });
+                                 }];
+  if (queued) {
+    _orphanTransitionCoordinator = coordinator;
+  }
+  return queued;
+}
+
+- (void)attemptOrphanTeardown {
+  if (!_orphanedAfterUnmount || _orphanDismissRequested) {
+    return;
+  }
+
+  UIViewController *presenter = self.presentingViewController;
+  if (!presenter) {
+    self.orphanedAfterUnmount = NO;
+    return;
+  }
+
+  // A dismissal issued mid-transition gets dropped — wait out ours, the
+  // presenter's, or a stacked child's
+  UIViewController *child = self.presentedViewController;
+  if ([self retryOrphanTeardownAfterTransitionOf:self] || [self retryOrphanTeardownAfterTransitionOf:presenter] ||
+      [self retryOrphanTeardownAfterTransitionOf:child]) {
+    return;
+  }
+
+  // A live child at rest keeps the orphan until it leaves — its didDismiss, the
+  // dismiss override, or the overlay poll retries then
+  if (child) {
+    return;
+  }
+
+  __weak __typeof(self) weakSelf = self;
+  if (self.isBeingPresented || self.isBeingDismissed || presenter.isBeingPresented || presenter.isBeingDismissed) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf attemptOrphanTeardown];
+    });
+    return;
+  }
+
+  if (presenter.presentedViewController != self) {
+    self.orphanedAfterUnmount = NO;
+    return;
+  }
+
+  _orphanDismissRequested = YES;
+  [presenter dismissViewControllerAnimated:NO
+                                completion:^{
+                                  __typeof(self) strongSelf = weakSelf;
+                                  if (strongSelf) {
+                                    strongSelf->_orphanDismissRequested = NO;
+                                    [strongSelf attemptOrphanTeardown];
+                                  }
+                                }];
+
+  // UIKit drops a dismissal it can't start without calling the completion
+  dispatch_async(dispatch_get_main_queue(), ^{
+    __typeof(self) strongSelf = weakSelf;
+    if (strongSelf && strongSelf->_orphanDismissRequested) {
+      strongSelf->_orphanDismissRequested = NO;
+      [strongSelf attemptOrphanTeardown];
+    }
+  });
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
   [super viewWillDisappear:animated];
+
+  // Captured now — presentingViewController is severed once the transition ends.
+  // Walks through dismissing parent sheets to the outermost presenter, so a whole
+  // stack survives an outer modal closing while a parent sheet's own dismiss()
+  // still closes its stack. A drag is the user closing the sheet itself.
+  if (self.isBeingDismissed && !_isDragging) {
+    UIViewController *presenter = self.presentingViewController;
+    while ([presenter isKindOfClass:[TrueSheetViewController class]] && presenter.isBeingDismissed) {
+      presenter = presenter.presentingViewController;
+    }
+    if (presenter.isBeingDismissed && ![presenter isKindOfClass:[TrueSheetViewController class]]) {
+      _dismissedWithPresenter = YES;
+    }
+  }
+
+  // Abort a dim repair in flight
+  _dimmingRepairGeneration++;
+
   [self restoreWindowAccessibilityElements];
   [self setSheetAccessibilityElementsHidden:YES];
 
-  // Dispatch to allow pan gesture to set _isDragging before checking
-  // handleTransitionTracker will emit when sheet is transitioning to dismiss
-  dispatch_async(dispatch_get_main_queue(), ^{
-    if (!self->_isDragging) {
-      [self emitWillDismissEvents];
-    }
-  });
+  // Dismissing with a child on top only animates the child out — this sheet
+  // doesn't move and isn't part of that transition, so fade its dim over it.
+  if (self.isBeingDismissed && self.presentedViewController) {
+    [UIView animateWithDuration:self.transitionCoordinator.transitionDuration
+                     animations:^{
+                       self->_dimView.alpha = 0;
+                       self->_fallbackDimView.alpha = 0;
+                     }];
+  } else if (self.isBeingDismissed && _fallbackDimView) {
+    // Unlike the custom dim, the fallback doesn't follow the position tracker
+    TrueSheetDimView *fallbackDimView = _fallbackDimView;
+    [self.transitionCoordinator
+      animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        fallbackDimView.alpha = 0;
+      }
+                      completion:nil];
+  }
+
+  // A swipe can still be cancelled, so emit once it commits on release. Any
+  // other dismiss (programmatic, outside tap, navigation) is already committed.
+  id<UIViewControllerTransitionCoordinator> coordinator = self.transitionCoordinator;
+  if (coordinator.isInteractive) {
+    __weak __typeof(self) weakSelf = self;
+    [coordinator
+      notifyWhenInteractionChangesUsingBlock:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
+        if (!context.isCancelled) {
+          [weakSelf emitWillDismissEvents];
+        }
+      }];
+  } else {
+    [self emitWillDismissEvents];
+  }
 
   [self setupTransitionTracker];
 }
@@ -460,54 +1305,147 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [self endInteractiveDismissState];
   }
 
+  // Dismissing with the keyboard up skips the hide notification — don't let
+  // the stale flag block learning on the next present, or a stale height keep
+  // the footer out of the auto detent.
+  _keyboardSheetGrown = NO;
+  _keyboardHeight = 0;
+  _minimizedKeyboardOverlap = 0;
+
   [self emitDidDismissEvents];
 }
 
 - (void)viewWillLayoutSubviews {
   [super viewWillLayoutSubviews];
 
-  // Skip during an interactive nav dismiss; emitInteractivePosition owns position then,
-  // and currentPosition (presentedView frame) stays at rest since we move the container.
-  if (!_isTransitioning && !_isInteractiveDismiss) {
-    _isTrackingPositionFromLayout = YES;
+  // Skip during transitions and nav swipes — their trackers own position then.
+  if (_isTransitioning || _isInteractiveDismiss) {
+    return;
+  }
 
-    if (_pendingContentSizeChange || _pendingDetentsChange) {
-      _pendingContentSizeChange = NO;
-      _pendingDetentsChange = NO;
-      [self settleAtDetentIndex:self.currentDetentIndex debug:@"layout"];
-    } else {
-      UIViewController *presented = self.presentedViewController;
-      BOOL hasPresentedController = presented != nil && !presented.isBeingPresented && !presented.isBeingDismissed;
-      [self emitChangePositionDelegateWithPosition:self.currentPosition
-                                          realtime:!hasPresentedController
-                                             debug:@"layout"];
+  // Mid-drag the frame tracks the finger — never settle or learn from it;
+  // pending changes keep their flags and settle on the first post-drag layout.
+  // A change landing mid-snap settles once the snap ends, since the frame
+  // UIKit lays out first isn't always the resting one.
+  BOOL settlePending = (_pendingContentSizeChange || _pendingDetentsChange) && !_isDragging;
+  if (settlePending) {
+    _pendingContentSizeChange = NO;
+    _pendingDetentsChange = NO;
+  }
+
+  if (settlePending && !self.isPresentedViewAnimating) {
+    [self settleAtDetentIndex:self.currentDetentIndex debug:@"layout"];
+  } else {
+    if (settlePending) {
+      [self settleWhenIdleWithDebug:@"layout"];
     }
+
+    // A child on top moves this sheet two ways: an animated collapse/restore
+    // step (presenting/dismissing) — emit the target non-realtime so JS
+    // animates to it — or direct per-frame re-layouts while the child drags,
+    // which stay realtime. Mid-drag no child is on top, so drags emit realtime.
+    BOOL realtime = self.presentedViewController == nil || !self.isPresentedViewAnimating;
+
+    // A layout pass at rest can nudge the frame by a sub-pixel amount
+    // (pixel-grid snapping after present), leaving the interpolated index
+    // slightly off the whole number. Re-learn when the frame is effectively
+    // at the current detent so the drift is absorbed instead of emitted.
+    // The tight threshold keeps real movement (e.g. scroll-driven expansion
+    // or a drag hovering near the detent) from being absorbed.
+    if (!_isDragging && self.presentedViewController == nil && !self.isPresentedViewAnimating) {
+      NSInteger index = self.currentDetentIndex;
+      CGFloat expectedHeight = [_detentCalculator resolvedHeightForIndex:index];
+      CGFloat actualHeight = self.screenHeight - self.currentPosition;
+      if (expectedHeight > 0 && fabs(actualHeight - expectedHeight) < 2) {
+        [self learnOffsetForDetentIndex:index];
+      }
+    }
+
+    [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:realtime debug:@"layout"];
+  }
+}
+
+// Rotation or an iPad window resize changes the height fractional detents
+// resolve against — re-resolve alongside the transition so the sheet lands on
+// the new height instead of waiting for a content-driven rebuild.
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+  [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+
+  if (@available(iOS 16.0, *)) {
+    [coordinator
+      animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        [self.sheet invalidateDetents];
+      }
+      completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        // Rotating a half-open foldable swaps between book and tabletop
+        [self updateHingeState];
+      }];
+  }
+}
+
+// Fires when UIKit resolves the sheet's float/anchored placement (present,
+// detent resize crossing the float threshold, rotation). The footer's
+// absorbed inset follows the observed safe area — repush it right away so
+// the footer pads/unpads in the same layout pass.
+- (void)viewSafeAreaInsetsDidChange {
+  [super viewSafeAreaInsetsDidChange];
+
+  // Mid-dismiss the frame moves off-screen and reports transient insets —
+  // don't let them pollute the observed value (matches viewDidLayoutSubviews).
+  if (!self.isBeingDismissed && !_isRefreshingSafeArea) {
+    [self.delegate viewControllerSafeAreaInsetsDidChange];
   }
 }
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
 
-  // Update state on rotation (width change)
-  CGFloat width = self.view.frame.size.width;
-  if (_lastWidth != width) {
-    _lastWidth = width;
-    [self.delegate viewControllerDidChangeSize:self.view.frame.size];
+  // viewSafeAreaInsetsDidChange doesn't fire on re-present when the observed
+  // inset matches the previous presentation's — refresh every layout pass
+  // instead (deduped downstream, so unchanged values are free).
+  if (!self.isBeingDismissed) {
+    [self.delegate viewControllerSafeAreaInsetsDidChange];
   }
+
+  // Skip size reports while backgrounded behind a stacked child — the push-back
+  // scaling changes the frame and would needlessly resize content.
+  // _lastReportedSize stays stale so the restore pass re-reports any real change.
+  if (!self.isStackedBehindChild) {
+    // Report any size change (detent resize, keyboard, rotation) so Yoga
+    // relayouts the container synchronously with the sheet.
+    CGSize size = self.view.frame.size;
+    if (!CGSizeEqualToSize(_lastReportedSize, size)) {
+      _lastReportedSize = size;
+      [self.delegate viewControllerDidChangeSize:size];
+    }
+  }
+
+  // The hinge callback can run before the division region updates; the
+  // relayout UIKit does for the posture change always sees the new region.
+  [self updateHingeState];
 
   if (_pendingDetentIndex >= 0) {
-    NSInteger pendingIndex = _pendingDetentIndex;
     _pendingDetentIndex = -1;
+    NSUInteger generation = _pendingDetentGeneration;
 
+    // No completion hook exists for the resize animation, hence the delay.
+    // A newer resize owns the report, and UIKit's selection is reported rather
+    // than the requested index — a stale one would also become the active
+    // detent and pull the sheet back on the next detents update.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-      CGFloat detent = [self detentValueForIndex:pendingIndex];
-      [self.delegate viewControllerDidChangeDetent:pendingIndex position:self.currentPosition detent:detent];
-      [self->_grabberView updateAccessibilityValueWithIndex:pendingIndex detentCount:self->_detents.count];
-      [self settleAtDetentIndex:pendingIndex debug:@"pending detent change"];
+      NSInteger index = self.currentDetentIndex;
+      if (generation != self->_pendingDetentGeneration || index < 0) {
+        return;
+      }
+
+      CGFloat detent = [self detentValueForIndex:index];
+      [self.delegate viewControllerDidChangeDetent:index position:self.currentPosition detent:detent];
+      [self->_grabberView updateAccessibilityValueWithIndex:index detentCount:self->_detents.count];
+      [self settleWhenIdleWithDebug:@"pending detent change"];
+      [self verifyDimmingAfterPresentation];
     });
   }
-
-  _isTrackingPositionFromLayout = NO;
 }
 
 #pragma mark - Position & Gesture Handling
@@ -569,17 +1507,26 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       _isDragging = YES;
       break;
     case UIGestureRecognizerStateChanged:
-      if (!_isTrackingPositionFromLayout) {
+      // Layout owns the emit while the sheet resizes with the finger (a
+      // layout pass is already queued), and the transition tick owns it
+      // during an interactive dismiss. Translation-only movement (e.g.
+      // dragging down to the first detent) triggers neither — emit here as
+      // the backup.
+      if (!_isTransitioning && !self.presentedView.layer.needsLayout && !self.viewIfLoaded.layer.needsLayout) {
         [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:YES debug:@"drag change"];
       }
       break;
     case UIGestureRecognizerStateEnded:
     case UIGestureRecognizerStateCancelled: {
       if (!_isTransitioning) {
+        // Dispatch so UIKit picks the target detent first. Emit the target
+        // non-realtime so JS animates alongside UIKit's snap spring, then learn
+        // once the snap has landed.
         dispatch_async(dispatch_get_main_queue(), ^{
-          NSInteger index = self.currentDetentIndex;
-          [self->_grabberView updateAccessibilityValueWithIndex:index detentCount:self->_detents.count];
-          [self settleAtDetentIndex:index debug:@"drag end"];
+          NSInteger endIndex = self.currentDetentIndex;
+          [self->_grabberView updateAccessibilityValueWithIndex:endIndex detentCount:self->_detents.count];
+          [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:NO debug:@"drag end"];
+          [self settleWhenIdleWithDebug:@"drag end"];
         });
       }
 
@@ -591,11 +1538,25 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   }
 }
 
+#pragma mark - Position Tracking
+
+/**
+ * Tracks the sheet's live position through a present/dismiss transition. The
+ * link's lifetime is scoped to the transition coordinator: started alongside
+ * the transition, stopped in its completion — which fires for finished and
+ * cancelled (interactive) transitions alike.
+ */
 - (void)setupTransitionTracker {
-  if (!self.transitionCoordinator)
+  id<UIViewControllerTransitionCoordinator> coordinator = self.transitionCoordinator;
+
+  // A cancelled dismiss re-enters viewWillAppear with the same coordinator —
+  // the tracker from viewWillDisappear still owns it.
+  if (!coordinator || _isTransitioning) {
     return;
+  }
 
   _isTransitioning = YES;
+  _transitionRestPosition = self.isBeingDismissed ? self.livePosition : self.currentPosition;
 
   // Learn the resolver-vs-actual offset before emitting transition positions so
   // the interpolated index lands exactly on the target detent. The presented
@@ -604,78 +1565,108 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     [self learnOffsetForDetentIndex:self.currentDetentIndex];
   }
 
-  CGRect dismissedFrame = CGRectMake(0, self.screenHeight, 0, 0);
-  CGRect presentedFrame = CGRectMake(0, self.currentPosition, 0, 0);
-
-  _transitionFakeView.frame = self.isBeingDismissed ? presentedFrame : dismissedFrame;
-
   __weak __typeof(self) weakSelf = self;
-
-  [self.transitionCoordinator
+  [coordinator
     animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
       __strong __typeof(weakSelf) strongSelf = weakSelf;
       if (!strongSelf)
         return;
 
-      [[context containerView] addSubview:strongSelf->_transitionFakeView];
-      strongSelf->_transitionFakeView.frame = strongSelf.isBeingDismissed ? dismissedFrame : presentedFrame;
-
-      strongSelf->_transitioningTimer = [CADisplayLink displayLinkWithTarget:strongSelf
-                                                                    selector:@selector(handleTransitionTracker)];
-      [strongSelf->_transitioningTimer addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
+      [strongSelf->_transitionLink invalidate];
+      strongSelf->_transitionLink = [CADisplayLink displayLinkWithTarget:strongSelf
+                                                                selector:@selector(handleTransitionTick)];
+      // Track at the display's native refresh rate — the default caps at 60Hz
+      // on ProMotion, dropping every other frame of a 120Hz animation.
+      strongSelf->_transitionLink.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
+      [strongSelf->_transitionLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
     completion:^(id<UIViewControllerTransitionCoordinatorContext> _Nonnull context) {
       __strong __typeof(weakSelf) strongSelf = weakSelf;
       if (!strongSelf)
         return;
 
-      [strongSelf->_transitioningTimer setPaused:YES];
-      [strongSelf->_transitioningTimer invalidate];
-      strongSelf->_transitioningTimer = nil;
-      [strongSelf->_transitionFakeView removeFromSuperview];
+      [strongSelf->_transitionLink invalidate];
+      strongSelf->_transitionLink = nil;
       strongSelf->_isTransitioning = NO;
-      strongSelf->_isTransitionSnapping = NO;
 
-      // Emit settled position after detent snap.
-      // Uses dispatch_after because presentedView frame isn't final until UIKit
-      // completes its layout pass after the transition animation.
-      if (strongSelf->_isPresented) {
+      // Settle after a present, cancelled dismiss, or detent-snap transition.
+      // Delayed because the presentedView frame isn't final until UIKit
+      // completes its layout pass after the transition animation — learning
+      // here absorbs any sub-pixel drift since the earlier learns. A dismiss
+      // cancelled mid-drag leaves the finger down, so the drag end settles instead.
+      if (strongSelf->_isPresented && !strongSelf.isBeingDismissed) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-          CGFloat position = strongSelf.currentPosition;
-          [strongSelf emitChangePositionDelegateWithPosition:position realtime:NO debug:@"transition end"];
+          if (!strongSelf->_isDragging) {
+            [strongSelf settleWhenIdleWithDebug:@"transition end"];
+          }
         });
+
+        // A cancelled dismiss may have faded the fallback dim out
+        [strongSelf verifyDimmingAfterPresentation];
       }
     }];
 }
 
-- (void)handleTransitionTracker {
-  if (!_isDragging && _transitionFakeView.layer) {
-    CALayer *layer = _transitionFakeView.layer;
-    CGFloat layerPosition = layer.presentationLayer.frame.origin.y;
+- (void)handleTransitionTick {
+  // Also covers the interactive dismiss phase (finger down) — layout passes
+  // are skipped while transitioning, so the tick owns position there too.
+  CGFloat position = self.livePosition;
 
-    if (self.currentPosition >= self.screenHeight) {
-      CGFloat position = fmax(_lastEmittedPositionState.position, layerPosition);
-
-      // Hide blur at the end of dismiss to prevent UIVisualEffectView
-      // from causing a flicker/flash at the bottom edge of the sheet.
-      if (self.screenHeight - position < 1) {
-        _blurView.alpha = 0;
-      }
-
-      [self emitWillDismissEvents];
-      [self emitChangePositionDelegateWithPosition:position realtime:YES debug:@"transition out"];
-
-    } else {
-      CGFloat position = fmax(self.currentPosition, layerPosition);
-      // Detect drag → snap transition jump; stay non-realtime for the rest of the animation
-      if (!_isTransitionSnapping && _isPresented && _lastEmittedPositionState.position > 0 &&
-          fabs(_lastEmittedPositionState.position - position) > 20) {
-        _isTransitionSnapping = YES;
-      }
-      BOOL realtime = !_isTransitionSnapping;
-      [self emitChangePositionDelegateWithPosition:position realtime:realtime debug:@"transition in"];
+  if (self.isBeingDismissed) {
+    // Hide blur at the end of dismiss to prevent UIVisualEffectView
+    // from causing a flicker/flash at the bottom edge of the sheet.
+    if (self.screenHeight - position < 1) {
+      _blurView.alpha = 0;
     }
   }
+
+  [self emitChangePositionDelegateWithPosition:position realtime:YES debug:@"transition"];
+}
+
+/**
+ * The sheet is at rest at a detent: learn the resolver-vs-actual offset and
+ * emit the settled position. Only valid when the presentedView frame is final
+ * — never mid-drag or mid-animation, where learning would store a bogus offset.
+ */
+- (void)settleAtDetentIndex:(NSInteger)index debug:(NSString *)debug {
+  // Don't learn while a child sits on top — the deck transform skews the
+  // measured frame; the next unobstructed settle learns.
+  if (self.presentedViewController == nil) {
+    [self learnOffsetForDetentIndex:index];
+    [self correctHingeOffsetForIndex:index];
+  }
+
+  [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:NO debug:debug];
+}
+
+/**
+ * Settles once nothing moves the sheet, so the learned offset comes from its
+ * resting frame — the frame UIKit lays out first during a snap isn't always
+ * the final one (e.g. the floating-sheet inset at small detents). A newer
+ * request replaces a waiting one. A drag, transition or nav swipe settles on
+ * its own end; a lingering animation stops the wait after a bound.
+ */
+- (void)settleWhenIdleWithDebug:(NSString *)debug {
+  [self settleWhenIdleWithDebug:debug generation:++_settleGeneration attempt:0];
+}
+
+- (void)settleWhenIdleWithDebug:(NSString *)debug generation:(NSUInteger)generation attempt:(NSInteger)attempt {
+  static const NSInteger kMaxIdleSettleAttempts = 30;
+
+  if (generation != _settleGeneration || !_isPresented || self.isBeingDismissed || _isDragging || _isTransitioning ||
+      _isInteractiveDismiss) {
+    return;
+  }
+
+  if (self.isPresentedViewAnimating && attempt < kMaxIdleSettleAttempts) {
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      [weakSelf settleWhenIdleWithDebug:debug generation:generation attempt:attempt + 1];
+    });
+    return;
+  }
+
+  [self settleAtDetentIndex:self.currentDetentIndex debug:debug];
 }
 
 #pragma mark - Interactive Navigation Dismiss
@@ -697,6 +1688,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   // Emit position from the container's presentation layer for the whole gesture, so
   // both the direct-set drag and the settle animation report a live, smooth position.
   _interactivePositionLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(emitInteractivePosition)];
+  _interactivePositionLink.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
   [_interactivePositionLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
 
@@ -792,13 +1784,40 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     }
   }
 
+  if (self.isPresented && !self.isBeingDismissed && !_isWillDismissEmitted && !_usesBackgroundEffects) {
+    NSInteger index = [_detentCalculator backgroundIndexForPosition:position displayedIndex:_displayedBackgroundIndex];
+    if (index != _displayedBackgroundIndex) {
+      _displayedBackgroundIndex = index;
+      [UIView animateWithDuration:0.2
+                            delay:0
+                          options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                       animations:^{
+                         [self setupBackground];
+                       }
+                       completion:nil];
+    }
+  }
+
+  // At rest the sheet sits on its selected detent, so report that detent. The
+  // interpolated index goes through learned offsets and can land a fraction
+  // off, which JS would then hold until the next movement.
+  NSInteger restingIndex = [self restingDetentIndexForRealtime:realtime];
   TrueSheetPositionState state = {
     .position = position,
-    .detent = [self interpolatedDetentForPosition:position],
-    .index = [self interpolatedIndexForPosition:position],
+    .detent =
+      restingIndex >= 0 ? [self detentValueForIndex:restingIndex] : [self interpolatedDetentForPosition:position],
+    .index = restingIndex >= 0 ? restingIndex : [self interpolatedIndexForPosition:position],
   };
 
-  if (!TrueSheetPositionStateEquals(_lastEmittedPositionState, state)) {
+  // A child on top only pushes this sheet back, its detent stays.
+  if (!presented) {
+    _dimView.alpha = [self dimAlphaForPosition:position index:state.index];
+  }
+
+  // Settle (non-realtime) emits are authoritative and bypass the dedupe — a
+  // learn right before them can correct the interpolated index by less than
+  // the tolerance, and the corrected value must still reach JS.
+  if (!realtime || !TrueSheetPositionStateEquals(_lastEmittedPositionState, state)) {
     _lastEmittedPositionState = state;
 
     [self.delegate viewControllerDidChangePosition:state.index
@@ -809,17 +1828,39 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (void)learnOffsetForDetentIndex:(NSInteger)index {
+  if (_keyboardSheetGrown || _minimizedKeyboardOverlap > 0) {
+    return;
+  }
   [_detentCalculator learnOffsetForDetentIndex:index];
 }
 
 /**
- * Learn the resolver-vs-actual offset at a settled detent, then emit the corrected
- * position. Only valid when presentedView's frame is final — never mid-drag or
- * mid-animation, where learning would store a bogus offset.
+ * The selected detent when the sheet rests on it, else -1. Settle emits always
+ * rest on it; realtime emits only when no drag, transition, nav swipe or
+ * animation moves the sheet. A keyboard-grown sheet rests above its detent.
  */
-- (void)settleAtDetentIndex:(NSInteger)index debug:(NSString *)debug {
-  [self learnOffsetForDetentIndex:index];
-  [self emitChangePositionDelegateWithPosition:self.currentPosition realtime:NO debug:debug];
+- (NSInteger)restingDetentIndexForRealtime:(BOOL)realtime {
+  if (_keyboardSheetGrown || _minimizedKeyboardOverlap > 0) {
+    return -1;
+  }
+
+  if (realtime && (_isDragging || _isTransitioning || _isInteractiveDismiss || self.isPresentedViewAnimating)) {
+    return -1;
+  }
+
+  return self.currentDetentIndex;
+}
+
+- (void)setKeyboardSheetGrown:(BOOL)keyboardSheetGrown {
+  BOOL wasGrown = _keyboardSheetGrown;
+  _keyboardSheetGrown = keyboardSheetGrown;
+
+  // Settles are skipped or measure a mid-animation frame while the keyboard
+  // has the sheet grown (e.g. a drag-end during the shrink-back) — re-settle
+  // at the resting detent once the keyboard is fully away.
+  if (wasGrown && !keyboardSheetGrown && self.isPresented && !_isDragging) {
+    [self settleWhenIdleWithDebug:@"keyboard settled"];
+  }
 }
 
 - (BOOL)findSegmentForPosition:(CGFloat)position outIndex:(NSInteger *)outIndex outProgress:(CGFloat *)outProgress {
@@ -838,13 +1879,180 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   return [_detentCalculator detentValueForIndex:index];
 }
 
+#pragma mark - Hinge
+
+/**
+ * Bottom edge (window coordinates) of an active horizontal fold, or 0 when the
+ * device isn't in tabletop. The division region is only active while the hinge
+ * is partially open, so this also excludes flat and closed postures.
+ */
+- (CGFloat)tabletopHingeEdge {
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(27_1)
+  if (@available(iOS 27.1, *)) {
+    UIWindow *window = self.hostWindow;
+    for (UIViewReservedRegion *region in [window reservedRegionsOfKind:[UIViewReservedRegionKind divisionRegionKind]]) {
+      CGRect frame = region.frame;
+      if (region.isActive && frame.size.width > frame.size.height) {
+        return CGRectGetMaxY(frame);
+      }
+    }
+  }
+#endif
+  return 0;
+}
+
+/**
+ * Gap between a hinge-placed detent's resolved height and the sheet's actual top
+ * edge: UIKit adds the bottom safe area, plus the floating sheet's inset. Every
+ * hinge-placed detent rests at the same height, so they share one offset — the
+ * first settle at the hinge learns it.
+ */
+- (CGFloat)hingeOffsetForHeight:(CGFloat)height {
+  if (_hingeOffset > 0) {
+    return _hingeOffset;
+  }
+
+  return [self bottomSafeAreaForHeight:height] + TrueSheetFloatingSheetInset;
+}
+
+// A hinge-placed detent resolved with an off estimate lands a few points off
+// the hinge — re-resolve once the settle has learned the real offset.
+- (void)correctHingeOffsetForIndex:(NSInteger)index {
+  NSNumber *usedOffset = _hingeOffsets[@(index)];
+  if (!usedOffset || _hingeCorrections >= 2) {
+    return;
+  }
+
+  CGFloat learnedOffset = [_detentCalculator learnedOffsetForIndex:index];
+  if (learnedOffset == 0 || fabs(learnedOffset - usedOffset.doubleValue) <= 1) {
+    return;
+  }
+
+  _hingeOffset = learnedOffset;
+  _hingeCorrections++;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self invalidateDetentsAnimated];
+  });
+}
+
+- (void)invalidateDetentsAnimated {
+  if (@available(iOS 16.0, *)) {
+    [self.sheet animateChanges:^{
+      self->_pendingContentSizeChange = YES;
+      [self.sheet invalidateDetents];
+    }];
+  }
+}
+
+/**
+ * Re-resolves hinge-placed detents when the posture changes, and runs 'snap':
+ * entering tabletop moves the sheet to the hinge detent, leaving it restores the
+ * previous detent if the sheet is still on the hinge. The posture a presentation
+ * starts in only records state, so presenting while already in tabletop doesn't
+ * jump the sheet. A change while presenting, dismissing, or dragging stays
+ * pending until the sheet is at rest again.
+ */
+- (void)updateHingeState {
+  NSInteger hingeIndex = self.foldOptions.hingeDetentIndex;
+  if (hingeIndex < 0 && self.foldOptions.hingeBehavior == TrueSheetViewHingeBehavior::None) {
+    return;
+  }
+
+  // Covered by a full-screen presentation, the sheet has no window to read the posture from
+  if (!self.viewIfLoaded.window) {
+    return;
+  }
+
+  CGFloat edge = [self tabletopHingeEdge];
+  if (!_hingeStateKnown) {
+    _hingeStateKnown = YES;
+    _hingeEdge = edge;
+    return;
+  }
+
+  if (!self.isPresented || self.isBeingDismissed || _isDragging || fabs(edge - _hingeEdge) < 0.5) {
+    return;
+  }
+
+  BOOL entered = edge > 0 && _hingeEdge == 0;
+  BOOL left = edge == 0 && _hingeEdge > 0;
+  _hingeEdge = edge;
+  _hingeOffset = 0;
+  _hingeCorrections = 0;
+
+  NSInteger targetIndex = -1;
+  NSInteger detentCount = (NSInteger)self.detents.count;
+  BOOL snaps =
+    self.foldOptions.hingeBehavior == TrueSheetViewHingeBehavior::Snap && hingeIndex >= 0 && hingeIndex < detentCount;
+  if (entered && snaps) {
+    _hingeRestoreIndex = self.currentDetentIndex;
+    targetIndex = hingeIndex;
+  } else if (left && _hingeRestoreIndex >= 0) {
+    // Keep a detent the user picked while folded
+    if (snaps && self.currentDetentIndex == hingeIndex) {
+      targetIndex = MIN(_hingeRestoreIndex, detentCount - 1);
+    }
+    _hingeRestoreIndex = -1;
+  }
+
+  // A resize settles through the pending detent change
+  BOOL resizes = targetIndex >= 0 && targetIndex != self.activeDetentIndex;
+
+  if (@available(iOS 16.0, *)) {
+    [self.sheet animateChanges:^{
+      [self.sheet invalidateDetents];
+      if (resizes) {
+        [self resizeToDetentIndex:targetIndex];
+      }
+    }];
+  }
+
+  // UIKit often re-resolves detents for the posture change on its own before
+  // this runs, so the invalidation above triggers no layout pass to settle in.
+  // Settle once the frame is final, same as a pending detent change.
+  if (!resizes) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      if (self.isPresented && !self.isBeingDismissed && !self->_isDragging && !self->_isTransitioning) {
+        [self settleAtDetentIndex:self.currentDetentIndex debug:@"hinge"];
+      }
+    });
+  }
+}
+
 #pragma mark - Sheet Configuration
 
+/**
+ * Applies a content/header/footer/peek size change to the already-built
+ * detents. Auto and peek detents resolve lazily from snapshots, so this only
+ * refreshes the snapshots and invalidates — never reassigns `sheet.detents`,
+ * which would force UIKit to re-layout the whole presentation stack (visibly
+ * perturbing a sheet behind this one).
+ */
 - (void)setupSheetDetentsForSizeChange {
-  [self.sheet animateChanges:^{
-    _pendingContentSizeChange = YES;
-    [self setupSheetDetents];
-  }];
+  if (@available(iOS 16.0, *)) {
+    CGFloat autoHeight = [_detentCalculator autoHeightForKeyboardHeight:_keyboardHeight] - [self autoDetentBottomInset];
+    CGFloat peekHeight = [_detentCalculator peekHeight] - [self peekDetentBottomInset];
+
+    if (fabs(autoHeight - _autoDetentHeight) < 0.5 && fabs(peekHeight - _peekDetentHeight) < 0.5) {
+      return;
+    }
+
+    _autoDetentHeight = autoHeight;
+    _peekDetentHeight = peekHeight;
+
+    [self invalidateDetentsAnimated];
+  }
+  // iOS 15: detents are fixed medium/large — size changes can't affect them.
+}
+
+// Re-resolves the detents in place, e.g. when an input to the resolver
+// changes after UIKit has already laid out the sheet.
+- (void)invalidateDetents {
+  if (@available(iOS 16.0, *)) {
+    [self.sheet animateChanges:^{
+      [self.sheet invalidateDetents];
+    }];
+  }
 }
 
 - (void)setupSheetDetentsForDetentsChange {
@@ -861,52 +2069,81 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   NSMutableArray<UISheetPresentationControllerDetent *> *detents = [NSMutableArray array];
   [_detentCalculator clearResolvedHeights];
+  _hingeCorrections = 0;
 
-  CGFloat autoHeight = [self.contentHeight floatValue] + [self.headerHeight floatValue];
+  _autoDetentHeight = [_detentCalculator autoHeightForKeyboardHeight:_keyboardHeight] - [self autoDetentBottomInset];
+  _peekDetentHeight = [_detentCalculator peekHeight] - [self peekDetentBottomInset];
 
   for (NSInteger index = 0; index < self.detents.count; index++) {
     id detent = self.detents[index];
-    UISheetPresentationControllerDetent *sheetDetent = [self detentForValue:detent
-                                                             withAutoHeight:autoHeight
-                                                                    atIndex:index];
+    UISheetPresentationControllerDetent *sheetDetent = [self detentForValue:detent atIndex:index];
     [detents addObject:sheetDetent];
   }
 
   [_detentCalculator setDetentCount:self.detents.count];
-  sheet.detents = detents;
-
-  if (self.dimmed && [self.dimmedDetentIndex integerValue] == 0) {
-    sheet.largestUndimmedDetentIdentifier = nil;
-  } else {
-    sheet.largestUndimmedDetentIdentifier = UISheetPresentationControllerDetentIdentifierLarge;
-
-    if (@available(iOS 16.0, *)) {
-      if (self.dimmed && self.dimmedDetentIndex) {
-        NSInteger dimmedIdx = [self.dimmedDetentIndex integerValue];
-        if (dimmedIdx > 0 && dimmedIdx - 1 < sheet.detents.count) {
-          sheet.largestUndimmedDetentIdentifier = sheet.detents[dimmedIdx - 1].identifier;
-        } else if (sheet.detents.lastObject) {
-          sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
-        }
-      } else if (sheet.detents.lastObject) {
-        sheet.largestUndimmedDetentIdentifier = sheet.detents.lastObject.identifier;
+  _usesBackgroundEffects = [self canUseBackgroundEffects:detents];
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(26_1) && !TARGET_OS_MACCATALYST
+  if (@available(iOS 26.1, *)) {
+    if (_usesBackgroundEffects) {
+      for (NSInteger index = 0; index < detents.count; index++) {
+        NSDictionary *entry = [self backgroundForIndex:index];
+        auto blur = entry[@"blur"] ? static_cast<TrueSheetViewBackgroundBlur>([entry[@"blur"] intValue])
+                                   : TrueSheetViewBackgroundBlur::None;
+        detents[index].backgroundEffect = [self backgroundEffectForColor:entry[@"color"] blur:blur];
       }
     }
   }
+#endif
+
+  sheet.detents = detents;
+  sheet.largestUndimmedDetentIdentifier = [self configuredLargestUndimmedDetentIdentifier];
 }
 
-- (UISheetPresentationControllerDetent *)detentForValue:(id)detent
-                                         withAutoHeight:(CGFloat)autoHeight
-                                                atIndex:(NSInteger)index {
+// Shared with the dimming self-heal, which restores exactly this policy.
+- (nullable UISheetPresentationControllerDetentIdentifier)configuredLargestUndimmedDetentIdentifier {
+  UISheetPresentationController *sheet = self.sheet;
+
+  if ([self useCustomDimming]) {
+    return sheet.detents.lastObject.identifier;
+  }
+
+  if ([self isDimmedAtEveryDetent]) {
+    return nil;
+  }
+
+  if (@available(iOS 16.0, *)) {
+    if (self.dimmed && self.dimmedDetentIndex) {
+      NSInteger dimmedIdx = [self.dimmedDetentIndex integerValue];
+      if (dimmedIdx > 0 && dimmedIdx - 1 < sheet.detents.count) {
+        return sheet.detents[dimmedIdx - 1].identifier;
+      }
+    }
+    if (sheet.detents.lastObject) {
+      return sheet.detents.lastObject.identifier;
+    }
+  }
+
+  return UISheetPresentationControllerDetentIdentifierLarge;
+}
+
+- (UISheetPresentationControllerDetent *)detentForValue:(id)detent atIndex:(NSInteger)index {
   if (![detent isKindOfClass:[NSNumber class]]) {
     return [UISheetPresentationControllerDetent mediumDetent];
   }
 
   CGFloat value = [detent doubleValue];
 
+  // Auto/peek resolve from height snapshots — refreshed only in
+  // setupSheetDetents and setupSheetDetentsForSizeChange — so size changes are
+  // picked up on invalidation, while UIKit's spontaneous re-resolutions (e.g.
+  // while a child sheet dismisses) read a stable value.
   if (value == -1) {
     if (@available(iOS 16.0, *)) {
-      return [self customDetentWithIdentifier:@"custom-auto" height:autoHeight atIndex:index];
+      return [self customDetentWithIdentifier:@"custom-auto"
+                                      atIndex:index
+                                  heightBlock:^CGFloat {
+                                    return self->_autoDetentHeight;
+                                  }];
     } else {
       return [UISheetPresentationControllerDetent mediumDetent];
     }
@@ -914,7 +2151,11 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   if (value == -2) {
     if (@available(iOS 16.0, *)) {
-      return [self customDetentWithIdentifier:@"custom-peek" height:[_detentCalculator peekHeight] atIndex:index];
+      return [self customDetentWithIdentifier:@"custom-peek"
+                                      atIndex:index
+                                  heightBlock:^CGFloat {
+                                    return self->_peekDetentHeight;
+                                  }];
     } else {
       return [UISheetPresentationControllerDetent mediumDetent];
     }
@@ -927,8 +2168,13 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   if (@available(iOS 16.0, *)) {
     NSString *detentId = [NSString stringWithFormat:@"custom-%f", value];
-    CGFloat sheetHeight = value * self.screenHeight;
-    return [self customDetentWithIdentifier:detentId height:sheetHeight atIndex:index];
+    // Resolve lazily — detents are built before presentation (no window yet), and
+    // UIKit re-resolves on container size changes (rotation, windowed iPad resize).
+    return [self customDetentWithIdentifier:detentId
+                                    atIndex:index
+                                heightBlock:^CGFloat {
+                                  return value * self.screenHeight;
+                                }];
   } else if (value >= 0.5) {
     return [UISheetPresentationControllerDetent largeDetent];
   } else {
@@ -937,27 +2183,82 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (UISheetPresentationControllerDetent *)customDetentWithIdentifier:(NSString *)identifier
-                                                             height:(CGFloat)height
-                                                            atIndex:(NSInteger)index API_AVAILABLE(ios(16.0)) {
-  CGFloat bottomAdjustment = [self detentBottomAdjustmentForHeight:height];
+                                                            atIndex:(NSInteger)index
+                                                        heightBlock:(CGFloat (^)(void))heightBlock
+  API_AVAILABLE(ios(16.0)) {
   return [UISheetPresentationControllerDetent
     customDetentWithIdentifier:identifier
                       resolver:^CGFloat(id<UISheetPresentationControllerDetentResolutionContext> context) {
                         CGFloat maxDetentValue = context.maximumDetentValue;
                         self->_detentCalculator.maxDetentHeight = maxDetentValue;
 
+                        CGFloat height = heightBlock();
+                        CGFloat bottomAdjustment = [self detentBottomAdjustmentForHeight:height];
                         CGFloat maxValue = self.maxContentHeight
                                              ? fmin(maxDetentValue, [self.maxContentHeight floatValue])
                                              : maxDetentValue;
+
                         CGFloat adjustedHeight = height - bottomAdjustment;
+                        NSInteger lastIndex = (NSInteger)self.detents.count - 1;
+
+                        // Tabletop: the hinge detent rests on the hinge, and 'avoid'/'snap'
+                        // cap every detent there.
+                        BOOL avoidsHinge = self.foldOptions.hingeBehavior != TrueSheetViewHingeBehavior::None;
+                        NSInteger hingeIndex = self.foldOptions.hingeDetentIndex;
+                        BOOL hasHingeDetent = hingeIndex >= 0 && hingeIndex <= lastIndex;
+                        CGFloat hingeEdge = (hasHingeDetent || avoidsHinge) ? [self tabletopHingeEdge] : 0;
+                        CGFloat hingeOffset = 0;
+                        CGFloat hingeHeight = 0;
+                        if (hingeEdge > 0) {
+                          CGFloat panelHeight = self.screenHeight - hingeEdge;
+                          hingeOffset = [self hingeOffsetForHeight:panelHeight];
+                          hingeHeight = panelHeight - hingeOffset;
+                          if (hasHingeDetent) {
+                            // Lower detents stay below the hinge detent and higher ones above
+                            // it, so the detents keep their order
+                            CGFloat hingeDetentHeight =
+                              avoidsHinge ? hingeHeight - (lastIndex - hingeIndex) : hingeHeight;
+                            if (index == hingeIndex) {
+                              adjustedHeight = hingeHeight;
+                            } else if (index < hingeIndex) {
+                              adjustedHeight = fmin(adjustedHeight, hingeDetentHeight - (hingeIndex - index));
+                            } else {
+                              adjustedHeight = fmax(adjustedHeight, hingeDetentHeight + (index - hingeIndex));
+                            }
+                          }
+                          if (avoidsHinge) {
+                            maxValue = fmin(maxValue, hingeHeight);
+                          }
+                        }
+
+                        // Only the last detent may occupy the full maximum. Two detents
+                        // resolving to the same height (e.g. a capped auto and 1) make
+                        // UIKit skip the stack's deck animation when presenting a child
+                        // sheet and snap the sheet behind into place instead.
+                        if (adjustedHeight >= maxValue && index < lastIndex) {
+                          maxValue -= lastIndex - index;
+                        }
+
                         CGFloat resolved = fmin(adjustedHeight, maxValue);
+
+                        // Detents within the collapse spacing of the hinge are hinge-placed.
+                        // They rest with the hinge offset, so position events map them right
+                        // before the first settle there.
+                        if (hingeHeight > 0 && fabs(resolved - hingeHeight) <= lastIndex + 0.5) {
+                          self->_hingeOffsets[@(index)] = @(hingeOffset);
+                          [self->_detentCalculator assumeOffset:hingeOffset forIndex:index];
+                        } else {
+                          [self->_hingeOffsets removeObjectForKey:@(index)];
+                        }
 
                         NSMutableArray *heights = self->_detentCalculator.resolvedDetentHeights;
                         if (heights && index >= 0 && index < (NSInteger)heights.count) {
                           heights[index] = @(resolved);
                         }
 
-                        return resolved;
+                        // Recorded uncompensated above: UIKit adds the overlap back on
+                        // top. A sheet shorter than the overlap still grows by the rest.
+                        return fmax(resolved - self.minimizedKeyboardOverlap, 0);
                       }];
 }
 
@@ -1012,50 +2313,88 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
 - (void)setupActiveDetentWithIndex:(NSInteger)index {
   _activeDetentIndex = index;
+  _displayedBackgroundIndex = index;
+  [self setupBackground];
   [self applyActiveDetent];
 }
 
 - (void)resizeToDetentIndex:(NSInteger)index {
-  if (index == _activeDetentIndex) {
+  if (index == _activeDetentIndex && index == self.currentDetentIndex) {
     return;
   }
 
   _pendingDetentIndex = index;
+  _pendingDetentGeneration++;
   _activeDetentIndex = index;
   [self applyActiveDetent];
 }
 
-- (void)setupBackground {
-  auto effectiveBackgroundBlur = self.backgroundBlur;
-  if (@available(iOS 26.0, *)) {
-    // iOS 26+ has default liquid glass effect
-  } else if (effectiveBackgroundBlur == TrueSheetViewBackgroundBlur::None && !self.backgroundColor) {
-    effectiveBackgroundBlur = TrueSheetViewBackgroundBlur::SystemMaterial;
-  }
-
-  BOOL hasBlur = effectiveBackgroundBlur != TrueSheetViewBackgroundBlur::None;
-
-  _blurView.backgroundBlur = hasBlur ? effectiveBackgroundBlur : TrueSheetViewBackgroundBlur::None;
-  _blurView.blurIntensity = self.blurIntensity;
-  _blurView.blurInteraction = self.blurInteraction;
-  [_blurView applyBlurEffect];
-
+- (BOOL)canUseBackgroundEffects:(NSArray<UISheetPresentationControllerDetent *> *)detents {
 #if RNTS_IPHONE_OS_VERSION_AVAILABLE(26_1) && !TARGET_OS_MACCATALYST
   if (@available(iOS 26.1, *)) {
-    if (!self.isDesignCompatibilityMode) {
-      if (self.backgroundColor) {
-        self.sheet.backgroundEffect = [UIColorEffect effectWithColor:self.backgroundColor];
-      } else if (hasBlur) {
-        self.sheet.backgroundEffect = [UIColorEffect effectWithColor:[UIColor clearColor]];
-      } else {
-        self.sheet.backgroundEffect = nil;
+    // Some 26.1 builds omit setters declared in the SDK.
+    if (self.isDesignCompatibilityMode || ![self.sheet respondsToSelector:@selector(setBackgroundEffect:)]) {
+      return NO;
+    }
+    for (UISheetPresentationControllerDetent *detent in detents) {
+      if (![detent respondsToSelector:@selector(setBackgroundEffect:)]) {
+        return NO;
       }
+    }
+    return YES;
+  }
+#endif
+  return NO;
+}
+
+- (NSDictionary *)backgroundForIndex:(NSInteger)index {
+  return index >= 0 && index < self.detentBackgrounds.count ? self.detentBackgrounds[index] : nil;
+}
+
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(26_1) && !TARGET_OS_MACCATALYST
+- (UIVisualEffect *)backgroundEffectForColor:(UIColor *)color
+                                        blur:(TrueSheetViewBackgroundBlur)blur API_AVAILABLE(ios(26.1)) {
+  if (blur != TrueSheetViewBackgroundBlur::None) {
+    return [UIBlurEffect effectWithStyle:[BlurUtil blurEffectStyleFromEnum:blur]];
+  }
+  return color ? [UIColorEffect effectWithColor:color] : nil;
+}
+#endif
+
+- (void)setupBackground {
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(26_1) && !TARGET_OS_MACCATALYST
+  if (@available(iOS 26.1, *)) {
+    if (_usesBackgroundEffects) {
+      self.sheet.backgroundEffect = [self backgroundEffectForColor:self.backgroundColor blur:self.backgroundBlur];
+      self.view.backgroundColor = nil;
+      _blurView.hidden = YES;
+      _blurView.backgroundBlur = TrueSheetViewBackgroundBlur::None;
+      [_blurView applyBlurEffect];
       return;
     }
   }
 #endif
 
-  self.view.backgroundColor = self.backgroundColor;
+  NSDictionary *entry = [self backgroundForIndex:_displayedBackgroundIndex];
+  BOOL hasEntry = entry[@"color"] || entry[@"blur"];
+  UIColor *color = hasEntry ? entry[@"color"] : self.backgroundColor;
+  auto effectiveBackgroundBlur =
+    hasEntry ? (entry[@"blur"] ? static_cast<TrueSheetViewBackgroundBlur>([entry[@"blur"] intValue])
+                               : TrueSheetViewBackgroundBlur::None)
+             : self.backgroundBlur;
+  if (@available(iOS 26.0, *)) {
+    // iOS 26+ has default liquid glass effect
+  } else if (effectiveBackgroundBlur == TrueSheetViewBackgroundBlur::None && !color) {
+    effectiveBackgroundBlur = TrueSheetViewBackgroundBlur::SystemMaterial;
+  }
+
+  BOOL hasBlur = effectiveBackgroundBlur != TrueSheetViewBackgroundBlur::None;
+
+  _blurView.hidden = NO;
+  _blurView.backgroundBlur = effectiveBackgroundBlur;
+  [_blurView applyBlurEffect];
+
+  self.view.backgroundColor = hasBlur ? nil : color;
 }
 
 - (void)setupGrabber {
@@ -1065,6 +2404,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     self.sheet.prefersGrabberVisible = NO;
 
     GrabberOptions *options = self.grabberOptions;
+    _grabberView.accessibilityOptions = self.accessibilityOptions;
     _grabberView.grabberWidth = options.width;
     _grabberView.grabberHeight = options.height;
     _grabberView.topMargin = options.topMargin;
@@ -1101,6 +2441,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
         }];
       } else if (strongSelf.dismissible) {
         [strongSelf.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+      } else {
+        [strongSelf.delegate viewControllerDidAttemptDismiss];
       }
     };
 
@@ -1112,6 +2454,8 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     _grabberView.onIncrement = nil;
     _grabberView.onDecrement = nil;
   }
+
+  [self refreshAccessibilityContainer];
 }
 
 - (void)handleGrabberTap {
@@ -1124,8 +2468,12 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
     return;
 
   NSInteger nextIndex = (currentIndex + 1) % detentCount;
-  if (nextIndex == 0 && detentCount == 1 && self.dismissible) {
-    [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+  if (nextIndex == 0 && detentCount == 1) {
+    if (self.dismissible) {
+      [self.presentingViewController dismissViewControllerAnimated:YES completion:nil];
+    } else {
+      [self.delegate viewControllerDidAttemptDismiss];
+    }
   } else {
     [self.sheet animateChanges:^{
       [self resizeToDetentIndex:nextIndex];
@@ -1134,8 +2482,23 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 }
 
 - (BOOL)isAnchored {
-  return self.anchor == TrueSheetViewAnchor::Left || self.anchor == TrueSheetViewAnchor::Right;
+  return self.placement == TrueSheetViewPlacement::Leading || self.placement == TrueSheetViewPlacement::Trailing;
 }
+
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(27_0)
+- (UISheetPresentationControllerPlacement)preferredPlacement API_AVAILABLE(ios(27.0)) {
+  switch (self.placement) {
+    case TrueSheetViewPlacement::Leading:
+      return UISheetPresentationControllerPlacementLeading;
+    case TrueSheetViewPlacement::Center:
+      return UISheetPresentationControllerPlacementCenter;
+    case TrueSheetViewPlacement::Trailing:
+      return UISheetPresentationControllerPlacementTrailing;
+    case TrueSheetViewPlacement::Automatic:
+      return UISheetPresentationControllerPlacementAutomatic;
+  }
+}
+#endif
 
 - (void)setupAnchorViewInView:(UIView *)parentView {
   if (!parentView)
@@ -1144,6 +2507,18 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [_anchorView removeFromSuperview];
   _anchorView = nil;
 
+#if RNTS_IPHONE_OS_VERSION_AVAILABLE(27_0)
+  // iOS 27 exposes native placement. `sourceView` must stay nil since it overrides `preferredPlacement`.
+  if (@available(iOS 27.0, *)) {
+    if ([self.sheetPresentationController respondsToSelector:@selector(setPreferredPlacement:)]) {
+      self.sheetPresentationController.sourceView = nil;
+      self.sheetPresentationController.preferredPlacement = [self preferredPlacement];
+      return;
+    }
+  }
+#endif
+
+  // Pre-27 has no explicit center, so `center` falls back to the system default like `automatic`.
   if (!self.isAnchored) {
     self.sheetPresentationController.sourceView = nil;
     return;
@@ -1155,7 +2530,7 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
   [parentView addSubview:_anchorView];
 
   NSLayoutAnchor *horizontalAnchor =
-    self.anchor == TrueSheetViewAnchor::Right ? parentView.trailingAnchor : parentView.leadingAnchor;
+    self.placement == TrueSheetViewPlacement::Trailing ? parentView.trailingAnchor : parentView.leadingAnchor;
 
   [NSLayoutConstraint activateConstraints:@[
     [_anchorView.bottomAnchor constraintEqualToAnchor:parentView.bottomAnchor],
@@ -1209,12 +2584,60 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
 
   [self setupBackground];
   [self setupGrabber];
+
+  // Dim props changed while presented. A hidden custom dim stays until dismiss;
+  // at alpha 0 it no longer takes touches.
+  if (_isPresented) {
+    [self setupDimView];
+    _dimView.alpha = [self dimAlphaForIndex:self.currentDetentIndex];
+
+    if (![self expectsSystemDimming]) {
+      [self removeFallbackDimView];
+    }
+  }
 }
 
 #pragma mark - UISheetPresentationControllerDelegate
 
 - (BOOL)presentationControllerShouldDismiss:(UIPresentationController *)presentationController {
-  return self.dismissible;
+  // A sheet that can't be dragged can't be swiped away either, including by
+  // pulling down its scroll view: refuse a dismissal while any pan is under
+  // way, and keep the one from a tap outside the sheet. Reset on every call:
+  // UIKit skips didAttemptToDismiss for a short pull.
+  _refusedPanDismiss =
+    self.dismissible && !self.draggable && [self hasActivePanInView:presentationController.containerView];
+  return self.dismissible && !_refusedPanDismiss;
+}
+
+- (BOOL)hasActivePanInView:(UIView *)view {
+  if (!view) {
+    return NO;
+  }
+  for (UIGestureRecognizer *recognizer in view.gestureRecognizers ?: @[]) {
+    if ([recognizer isKindOfClass:[UIPanGestureRecognizer class]] &&
+        (recognizer.state == UIGestureRecognizerStateBegan || recognizer.state == UIGestureRecognizerStateChanged)) {
+      return YES;
+    }
+  }
+  for (UIView *subview in view.subviews) {
+    if ([self hasActivePanInView:subview]) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+// UIKit calls this after shouldDismiss returns NO — the sheet has already
+// bounced back, so JS can confirm and dismiss programmatically (Apple's
+// unsaved-changes pattern).
+- (void)presentationControllerDidAttemptToDismiss:(UIPresentationController *)presentationController {
+  // A swipe refused only because the sheet can't be dragged isn't an attempt
+  // to dismiss a non-dismissible sheet.
+  if (_refusedPanDismiss) {
+    _refusedPanDismiss = NO;
+    return;
+  }
+  [self.delegate viewControllerDidAttemptDismiss];
 }
 
 - (void)sheetPresentationControllerDidChangeSelectedDetentIdentifier:
@@ -1225,6 +2648,10 @@ static char TrueSheetAccessibilityWindowPreviousElementsKey;
       CGFloat detent = [self detentValueForIndex:index];
       [self.delegate viewControllerDidChangeDetent:index position:self.currentPosition detent:detent];
     }
+
+    // Crossing dimmedDetentIndex changes whether a dim is expected
+    [self verifyDimmingAfterPresentation];
+    [self settleWhenIdleWithDebug:@"detent change"];
   });
 }
 

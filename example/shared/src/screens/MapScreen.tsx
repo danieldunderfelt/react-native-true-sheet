@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
 import {
   Platform,
+  ScrollView,
   StyleSheet,
-  Text,
   TouchableOpacity,
   useWindowDimensions,
   View,
-  type LayoutChangeEvent,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
@@ -34,8 +33,8 @@ import Animated, {
 import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
 import { ReanimatedTrueSheetProvider } from '@lodev09/react-native-true-sheet/reanimated';
 
-import { Button, ButtonGroup, DemoContent, Header, Spacer } from '../components';
-import { BLUE, DARK, GAP, GRAY, HEADER_HEIGHT, SPACING } from '../utils';
+import { Button, ButtonGroup, DemoContent, Footer, Header, Spacer, Text } from '../components';
+import { BLUE, DARK, GAP, HEADER_HEIGHT, SPACING } from '../utils';
 
 import {
   BasicSheet,
@@ -94,10 +93,7 @@ const MapScreenInner = ({
   const { width, height } = useWindowDimensions();
   const { animatedPosition } = useReanimatedTrueSheet();
 
-  const isTablet = useMemo(() => {
-    if (Platform.OS === 'ios') return Platform.isPad;
-    return Math.min(width, height) >= 600;
-  }, [width, height]);
+  const isTablet = Math.min(width, height) >= 600;
 
   const sheetRef = useRef<TrueSheet>(null);
 
@@ -159,32 +155,39 @@ const MapScreenInner = ({
   return (
     <View style={styles.container}>
       <MapComponent style={styles.map} />
-      <View pointerEvents="none" style={styles.logContainer}>
-        {logs.map((entry) => (
-          <LogLine key={entry.id} text={entry.text} />
-        ))}
-      </View>
+      {__DEV__ && (
+        <View pointerEvents="none" style={styles.logContainer}>
+          {logs.map((entry) => (
+            <LogLine key={entry.id} text={entry.text} />
+          ))}
+        </View>
+      )}
       <AnimatedButton
         activeOpacity={0.6}
         style={[styles.floatingControl, floatingControlStyles]}
-        onPress={() => sheetRef.current?.present(1)}
+        onPress={() => sheetRef.current?.present(0)}
       />
       <ReanimatedTrueSheet
         name="main"
         detents={['peek', 'auto', 1]}
         ref={sheetRef}
+        footer={
+          <Footer
+            onTouchStart={(e) => log(`footer touchStart y:${Math.round(e.nativeEvent.pageY)}`)}
+            onPressIn={() => log('footer pressIn')}
+            onPressOut={() => log('footer pressOut')}
+            onPress={() => log('footer pressed')}
+          />
+        }
+        footerStyle={styles.footer}
         initialDetentIndex={0}
-        anchor={anchorLeft ? 'left' : 'center'}
+        placement={anchorLeft ? 'leading' : 'center'}
         maxContentWidth={maxContentWidth}
         dimmedDetentIndex={1}
-        style={styles.content}
+        detentBackgrounds={[null, null, BLUE]}
+        style={styles.sheet}
         detached
         dismissible={false}
-        onLayout={(e: LayoutChangeEvent) => {
-          log(
-            `layout ${Math.round(e.nativeEvent.layout.width)}×${Math.round(e.nativeEvent.layout.height)}`
-          );
-        }}
         onWillPresent={(e: WillPresentEvent) => {
           log(
             `willPresent i:${e.nativeEvent.index} d:${e.nativeEvent.detent} y:${Math.round(e.nativeEvent.position)}`
@@ -210,84 +213,80 @@ const MapScreenInner = ({
             `dragBegin i:${e.nativeEvent.index} d:${e.nativeEvent.detent} y:${Math.round(e.nativeEvent.position)}`
           );
         }}
-        // onDragChange={(e: DragChangeEvent) => {
-        //   log(
-        //     `dragChange i:${e.nativeEvent.index} d:${e.nativeEvent.detent} y:${Math.round(e.nativeEvent.position)}`
-        //   );
-        // }}
         onDragEnd={(e: DragEndEvent) => {
           log(
             `dragEnd i:${e.nativeEvent.index} d:${e.nativeEvent.detent} y:${Math.round(e.nativeEvent.position)}`
           );
         }}
-        // onPositionChange={(e: PositionChangeEvent) => {
-        //   'worklet';
-        //   runOnJS(log)(
-        //     `position i:${e.nativeEvent.index} d:${e.nativeEvent.detent.toFixed(2)} y:${Math.round(e.nativeEvent.position)} rt:${e.nativeEvent.realtime}`
-        //   );
-        // }}
         onWillDismiss={() => log('willDismiss')}
         onDidDismiss={() => log('didDismiss')}
         header={<Header />}
       >
-        <View style={styles.heading}>
-          <Text style={styles.title}>True Sheet</Text>
-          <Text style={styles.subtitle}>The true native bottom sheet experience.</Text>
-        </View>
-        <Button
-          text="TrueSheet View"
-          hint="Long press to stress test"
-          onPress={() => presentBasicSheet(0)}
-          onLongPress={rapidPresentDismiss}
-        />
-        <Button text="Open Modal" onPress={onNavigateToModal} />
-        <Button text="Sheet Navigator" onPress={onNavigateToSheetStack} />
-        {isTablet && (
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          alwaysBounceVertical={false}
+          contentContainerStyle={styles.content}
+        >
+          <View style={styles.heading}>
+            <Text style={styles.title}>True Sheet</Text>
+            <Text style={styles.subtitle}>The true native bottom sheet experience.</Text>
+          </View>
+          <Button
+            text="TrueSheet View"
+            hint="Long press to stress test"
+            onPress={() => presentBasicSheet(0)}
+            onLongPress={rapidPresentDismiss}
+          />
+          <Button text="Open Modal" onPress={onNavigateToModal} />
+          <Button text="Sheet Navigator" onPress={onNavigateToSheetStack} />
+          {isTablet && (
+            <ButtonGroup>
+              <Button text="Leading" onPress={() => setAnchorLeft(true)} />
+              <Button text="Center" onPress={() => setAnchorLeft(false)} />
+            </ButtonGroup>
+          )}
           <ButtonGroup>
-            <Button text="Anchor Left" onPress={() => setAnchorLeft(true)} />
-            <Button text="Center" onPress={() => setAnchorLeft(false)} />
+            <Button text="Test Screen" onPress={onNavigateToTest} />
+            <Button text="Test Stack" onPress={onNavigateToTestStack} />
           </ButtonGroup>
-        )}
-        <ButtonGroup>
-          <Button text="Test Screen" onPress={onNavigateToTest} />
-          <Button text="Test Stack" onPress={onNavigateToTestStack} />
-        </ButtonGroup>
-        <Spacer />
-        <ButtonGroup>
-          <Button text="Prompt" onPress={() => promptSheet.current?.present()} />
-          <Button text="Gestures" onPress={() => gestureSheet.current?.present()} />
-        </ButtonGroup>
-        <ButtonGroup>
-          <Button
-            text="ScrollView"
-            loading={scrollViewLoading}
-            disabled={scrollViewLoading}
-            onPress={presentScrollViewSheet}
+          <Spacer />
+          <ButtonGroup>
+            <Button text="Prompt" onPress={() => promptSheet.current?.present()} />
+            <Button text="Gestures" onPress={() => gestureSheet.current?.present()} />
+          </ButtonGroup>
+          <ButtonGroup>
+            <Button
+              text="ScrollView"
+              loading={scrollViewLoading}
+              disabled={scrollViewLoading}
+              onPress={presentScrollViewSheet}
+            />
+            <Button text="FlatList" onPress={() => flatListSheet.current?.present()} />
+          </ButtonGroup>
+          <Spacer />
+          {showExtraContent && <DemoContent text="Extra content that changes height" />}
+          <ButtonGroup>
+            <Button
+              text={showExtraContent ? 'Remove Content' : 'Add Content'}
+              onPress={() => setShowExtraContent(!showExtraContent)}
+            />
+            <Button text="Expand" onPress={() => sheetRef.current?.resize(2)} />
+          </ButtonGroup>
+          <ButtonGroup>
+            <Button text="Collapse" onPress={() => sheetRef.current?.resize(0)} />
+            <Button text="Dismiss" onPress={() => sheetRef.current?.dismiss()} />
+          </ButtonGroup>
+          <BasicSheet
+            ref={basicSheet}
+            onNavigateToModal={onNavigateToModal}
+            onNavigateToTest={onNavigateToTest}
           />
-          <Button text="FlatList" onPress={() => flatListSheet.current?.present()} />
-        </ButtonGroup>
-        <Spacer />
-        {showExtraContent && <DemoContent text="Extra content that changes height" />}
-        <ButtonGroup>
-          <Button
-            text={showExtraContent ? 'Remove Content' : 'Add Content'}
-            onPress={() => setShowExtraContent(!showExtraContent)}
-          />
-          <Button text="Expand" onPress={() => sheetRef.current?.resize(2)} />
-        </ButtonGroup>
-        <ButtonGroup>
-          <Button text="Collapse" onPress={() => sheetRef.current?.resize(0)} />
-          <Button text="Dismiss" onPress={() => sheetRef.current?.dismiss()} />
-        </ButtonGroup>
-        <BasicSheet
-          ref={basicSheet}
-          onNavigateToModal={onNavigateToModal}
-          onNavigateToTest={onNavigateToTest}
-        />
-        <PromptSheet ref={promptSheet} />
-        <ScrollViewSheet ref={scrollViewSheet} />
-        <FlatListSheet ref={flatListSheet} />
-        <GestureSheet ref={gestureSheet} />
+          <PromptSheet ref={promptSheet} />
+          <ScrollViewSheet ref={scrollViewSheet} />
+          <FlatListSheet ref={flatListSheet} />
+          <GestureSheet ref={gestureSheet} />
+        </ScrollView>
       </ReanimatedTrueSheet>
     </View>
   );
@@ -322,9 +321,13 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   map: StyleSheet.absoluteFill,
+  sheet: { flex: 1 },
   content: {
     padding: SPACING,
     gap: GAP,
+  },
+  footer: {
+    backgroundColor: DARK,
   },
   heading: {
     marginBottom: SPACING,
@@ -333,11 +336,10 @@ const styles = StyleSheet.create({
     fontSize: 24,
     lineHeight: 30,
     fontWeight: '500',
-    color: 'white',
   },
   subtitle: {
     lineHeight: 24,
-    color: GRAY,
+    opacity: 0.6,
   },
   logContainer: {
     position: 'absolute',

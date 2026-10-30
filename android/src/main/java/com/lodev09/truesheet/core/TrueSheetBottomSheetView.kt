@@ -1,7 +1,6 @@
 package com.lodev09.truesheet.core
 
 import android.annotation.SuppressLint
-import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.Rect
@@ -18,8 +17,9 @@ import androidx.core.view.ViewCompat
 import com.facebook.react.uimanager.PixelUtil.dpToPx
 import com.facebook.react.uimanager.ThemedReactContext
 import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.lodev09.truesheet.TrueSheetAnchor
+import com.lodev09.truesheet.TrueSheetPlacement
 import com.lodev09.truesheet.utils.ScreenUtils
+import com.lodev09.truesheet.utils.isDarkMode
 
 interface TrueSheetBottomSheetViewDelegate {
   val isTopmostSheet: Boolean
@@ -27,10 +27,11 @@ interface TrueSheetBottomSheetViewDelegate {
   val sheetElevation: Float
   val sheetBackgroundColor: Int?
   val maxContentWidth: Int?
-  val anchor: TrueSheetAnchor
-  val anchorOffset: Int
+  val placement: TrueSheetPlacement
+  val placementOffset: Int
   val grabber: Boolean
   val grabberOptions: GrabberOptions?
+  val accessibilityOptions: AccessibilityOptions?
   val draggable: Boolean
   fun bottomSheetViewDidTapGrabber()
   fun bottomSheetViewDidAccessibilityIncrement()
@@ -78,16 +79,6 @@ class TrueSheetBottomSheetView(private val reactContext: ThemedReactContext) : F
     // Allow content to extend beyond bounds (for footer positioning)
     clipChildren = false
     clipToPadding = false
-
-    ViewCompat.setAccessibilityPaneTitle(this, "Bottom sheet")
-  }
-
-  override fun setTranslationY(translationY: Float) {
-    // This prevents keyboard inset animations from resetting parent sheet translation
-    if (translationY == 0f && this.translationY != 0f) {
-      return
-    }
-    super.setTranslationY(translationY)
   }
 
   // =============================================================================
@@ -95,13 +86,19 @@ class TrueSheetBottomSheetView(private val reactContext: ThemedReactContext) : F
   // =============================================================================
 
   private fun resolveAnchor(): Pair<Int, Int> {
-    val anchor = if (ScreenUtils.isPortraitPhone(reactContext)) null else delegate?.anchor
-    val gravity = when (anchor) {
-      TrueSheetAnchor.LEFT -> Gravity.START
-      TrueSheetAnchor.RIGHT -> Gravity.END
+    val placement = if (ScreenUtils.isPortraitPhone(reactContext)) null else delegate?.placement
+    val gravity = when (placement) {
+      TrueSheetPlacement.LEADING -> Gravity.START
+      TrueSheetPlacement.TRAILING -> Gravity.END
       else -> Gravity.CENTER_HORIZONTAL
     } or Gravity.BOTTOM
-    val margin = if (anchor == TrueSheetAnchor.LEFT || anchor == TrueSheetAnchor.RIGHT) delegate?.anchorOffset ?: 0 else 0
+    val margin = if (placement == TrueSheetPlacement.LEADING ||
+      placement == TrueSheetPlacement.TRAILING
+    ) {
+      delegate?.placementOffset ?: 0
+    } else {
+      0
+    }
     return Pair(gravity, margin)
   }
 
@@ -174,13 +171,15 @@ class TrueSheetBottomSheetView(private val reactContext: ThemedReactContext) : F
     clipToOutline = true
   }
 
-  private fun getDefaultBackgroundColor(): Int {
-    val isNight = (
-      reactContext.resources.configuration.uiMode and
-        Configuration.UI_MODE_NIGHT_MASK
-      ) == Configuration.UI_MODE_NIGHT_YES
-    return if (isNight) COLOR_SURFACE_CONTAINER_LOW_DARK else COLOR_SURFACE_CONTAINER_LOW_LIGHT
+  fun updateBackgroundColor(color: Int) {
+    (background as? ShapeDrawable)?.let {
+      it.paint.color = color
+      it.invalidateSelf()
+    }
   }
+
+  fun getDefaultBackgroundColor(): Int =
+    if (reactContext.isDarkMode) COLOR_SURFACE_CONTAINER_LOW_DARK else COLOR_SURFACE_CONTAINER_LOW_LIGHT
 
   fun setupElevation() {
     val value = delegate?.sheetElevation ?: DEFAULT_ELEVATION
@@ -195,21 +194,35 @@ class TrueSheetBottomSheetView(private val reactContext: ThemedReactContext) : F
   fun setupGrabber() {
     findViewWithTag<View>(GRABBER_TAG)?.let { removeView(it) }
 
+    // Content view is the controller, added before the grabber (delegate is the controller)
+    val contentView = delegate as? View
+
     val isEnabled = delegate?.grabber ?: true
     val isDraggable = delegate?.draggable ?: true
-    if (!isEnabled || !isDraggable) return
+    if (!isEnabled || !isDraggable) {
+      contentView?.accessibilityTraversalAfter = View.NO_ID
+      return
+    }
 
-    val grabberView = TrueSheetGrabberView(reactContext, delegate?.grabberOptions).apply {
+    val grabberView = TrueSheetGrabberView(reactContext, delegate?.grabberOptions, delegate?.accessibilityOptions).apply {
       tag = GRABBER_TAG
+      id = View.generateViewId()
       onAccessibilityIncrement = { delegate?.bottomSheetViewDidAccessibilityIncrement() }
       onAccessibilityDecrement = { delegate?.bottomSheetViewDidAccessibilityDecrement() }
     }
 
     addView(grabberView)
+
+    // Grabber is added after content for z-ordering, but should be announced first
+    contentView?.accessibilityTraversalAfter = grabberView.id
   }
 
   fun updateGrabberAccessibilityValue(index: Int, detentCount: Int) {
     findViewWithTag<TrueSheetGrabberView>(GRABBER_TAG)?.updateAccessibilityValue(index, detentCount)
+  }
+
+  fun setupAccessibility() {
+    ViewCompat.setAccessibilityPaneTitle(this, delegate?.accessibilityOptions?.paneTitle ?: "Bottom sheet")
   }
 
   // =============================================================================

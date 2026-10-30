@@ -1,24 +1,18 @@
 package com.lodev09.truesheet
 
 import android.annotation.SuppressLint
-import android.view.MotionEvent
-import android.view.View
-import android.view.ViewParent
-import com.facebook.react.uimanager.JSPointerDispatcher
-import com.facebook.react.uimanager.JSTouchDispatcher
-import com.facebook.react.uimanager.PointerEvents
-import com.facebook.react.uimanager.RootView
+import com.facebook.react.bridge.WritableNativeMap
+import com.facebook.react.uimanager.PixelUtil.pxToDp
+import com.facebook.react.uimanager.StateWrapper
 import com.facebook.react.uimanager.ThemedReactContext
-import com.facebook.react.uimanager.events.EventDispatcher
 import com.facebook.react.views.view.ReactViewGroup
-import com.lodev09.truesheet.core.TrueSheetCoordinatorLayout
 
 /**
- * Delegate interface for footer view size changes and event dispatching
+ * Delegate interface for footer view size changes
  */
 interface TrueSheetFooterViewDelegate {
   fun footerViewDidChangeSize(width: Int, height: Int)
-  val eventDispatcher: EventDispatcher?
+  fun footerViewDidLayout()
 }
 
 /**
@@ -26,26 +20,68 @@ interface TrueSheetFooterViewDelegate {
  * This is the second child of TrueSheetContainerView
  * Positioned absolutely at the bottom of the sheet
  *
- * Implements RootView to handle touch events when positioned outside parent bounds.
+ * Touches reach it through the controller's RootView like any other sheet
+ * content — the container tracks the sheet's visible height, so the footer
+ * always lays out inside the container's bounds.
  */
 @SuppressLint("ViewConstructor")
-class TrueSheetFooterView(private val reactContext: ThemedReactContext) :
-  ReactViewGroup(reactContext),
-  RootView {
+class TrueSheetFooterView(reactContext: ThemedReactContext) : ReactViewGroup(reactContext) {
 
   var delegate: TrueSheetFooterViewDelegate? = null
-
-  private val eventDispatcher: EventDispatcher?
-    get() = delegate?.eventDispatcher
+  var stateWrapper: StateWrapper? = null
 
   private var lastWidth = 0
   private var lastHeight = 0
+  private var stateTranslationY = 0f
 
-  private val jsTouchDispatcher = JSTouchDispatcher(this)
-  private var jsPointerDispatcher: JSPointerDispatcher? = null
+  var bottomInset = 0
+    private set
 
-  init {
-    jsPointerDispatcher = JSPointerDispatcher(this)
+  /**
+   * positionFooter slides the footer off its Yoga position (above the
+   * keyboard, or riding the sheet). Mirror where it rests into the shadow
+   * node so measure() — and Pressability's press region — match where it's
+   * drawn. Called once the footer settles: every push is a commit.
+   */
+  fun syncTranslationState() {
+    if (translationY == stateTranslationY) return
+    val sw = stateWrapper ?: return
+    stateTranslationY = translationY
+    TrueSheetStateUpdater.updateFooterTranslation(sw, translationY.pxToDp())
+  }
+
+  /**
+   * Height the footer occupies above the keyboard — its layout height minus
+   * the safe-area inset, which rides below the keyboard's top edge while the
+   * keyboard is open (see positionFooter).
+   */
+  val keyboardOcclusionHeight: Int
+    get() = maxOf(0, height - bottomInset)
+
+  /**
+   * Tells the shadow node to pad the footer's bottom edge with the sheet's
+   * bottom safe-area inset — the footer owns the sheet's bottom edge, so it
+   * absorbs the inset and its background fills it.
+   */
+  fun setBottomInset(inset: Int) {
+    if (bottomInset == inset) return
+    bottomInset = inset
+
+    val sw = stateWrapper ?: return
+    val insetDp = bottomInset.toFloat().pxToDp()
+    // Carried along — this update replaces a still-queued translation update
+    stateTranslationY = translationY
+    val translateYDp = translationY.pxToDp()
+
+    // Synchronous update — the footer must be padded before detents are
+    // configured, otherwise the auto detent is set up an inset short
+    if (TrueSheetStateUpdater.updateFooterState(sw, insetDp, translateYDp)) return
+
+    // Fallback: async state update
+    val newState = WritableNativeMap()
+    newState.putDouble("bottomInset", insetDp.toDouble())
+    newState.putDouble("translateY", translateYDp.toDouble())
+    sw.updateState(newState)
   }
 
   override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -58,62 +94,15 @@ class TrueSheetFooterView(private val reactContext: ThemedReactContext) :
     }
   }
 
-  // ==================== RootView Implementation ====================
-
-  override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
-    eventDispatcher?.let { dispatcher ->
-      jsTouchDispatcher.handleTouchEvent(event, dispatcher, reactContext)
-      jsPointerDispatcher?.handleMotionEvent(event, dispatcher, true)
-    }
-    return super.onInterceptTouchEvent(event)
-  }
-
-  override fun onTouchEvent(event: MotionEvent): Boolean {
-    if (pointerEvents == PointerEvents.NONE || pointerEvents == PointerEvents.BOX_NONE) {
-      return false
-    }
-
-    eventDispatcher?.let { dispatcher ->
-      jsTouchDispatcher.handleTouchEvent(event, dispatcher, reactContext)
-      jsPointerDispatcher?.handleMotionEvent(event, dispatcher, false)
-    }
-    super.onTouchEvent(event)
-    return true
-  }
-
-  override fun onInterceptHoverEvent(event: MotionEvent): Boolean {
-    eventDispatcher?.let { jsPointerDispatcher?.handleMotionEvent(event, it, true) }
-    return super.onHoverEvent(event)
-  }
-
-  override fun onHoverEvent(event: MotionEvent): Boolean {
-    eventDispatcher?.let { jsPointerDispatcher?.handleMotionEvent(event, it, false) }
-    return super.onHoverEvent(event)
-  }
-
-  override fun onChildStartedNativeGesture(childView: View?, ev: MotionEvent) {
-    findCoordinatorLayout()?.childDidClaimNativeGesture()
-    eventDispatcher?.let { dispatcher ->
-      jsTouchDispatcher.onChildStartedNativeGesture(ev, dispatcher)
-      jsPointerDispatcher?.onChildStartedNativeGesture(childView, ev, dispatcher)
-    }
-  }
-
-  private fun findCoordinatorLayout(): TrueSheetCoordinatorLayout? {
-    var current: ViewParent? = parent
-    while (current != null && current !is TrueSheetCoordinatorLayout) {
-      current = current.parent
-    }
-    return current as? TrueSheetCoordinatorLayout
-  }
-
-  override fun onChildEndedNativeGesture(childView: View, ev: MotionEvent) {
-    eventDispatcher?.let { jsTouchDispatcher.onChildEndedNativeGesture(ev, it) }
-    jsPointerDispatcher?.onChildEndedNativeGesture()
-  }
-
-  override fun handleException(t: Throwable) {
-    reactContext.reactApplicationContext.handleException(RuntimeException(t))
+  override fun onLayout(
+    changed: Boolean,
+    left: Int,
+    top: Int,
+    right: Int,
+    bottom: Int
+  ) {
+    super.onLayout(changed, left, top, right, bottom)
+    delegate?.footerViewDidLayout()
   }
 
   companion object {

@@ -18,6 +18,9 @@
 #import <React/RCTViewComponentView.h>
 
 #import <react/renderer/components/TrueSheetSpec/ComponentDescriptors.h>
+#import <react/renderer/components/TrueSheetSpec/TrueSheetContentViewComponentDescriptor.h>
+#import <react/renderer/components/TrueSheetSpec/TrueSheetFooterViewComponentDescriptor.h>
+#import <react/renderer/components/TrueSheetSpec/TrueSheetOverlayViewComponentDescriptor.h>
 #import <react/renderer/components/TrueSheetSpec/TrueSheetViewComponentDescriptor.h>
 
 #import <TrueSheetSpec/TrueSheetSpec.h>
@@ -92,6 +95,17 @@ using namespace facebook::react;
 
 @end
 
+@interface TrueSheetOverlayView : RCTViewComponentView
+@end
+
+@implementation TrueSheetOverlayView
+
++ (ComponentDescriptorProvider)componentDescriptorProvider {
+  return concreteComponentDescriptorProvider<TrueSheetOverlayViewComponentDescriptor>();
+}
+
+@end
+
 #pragma mark - Module
 
 @interface TrueSheetModule : NSObject <RCTBridgeModule, NativeTrueSheetModuleSpec>
@@ -144,6 +158,14 @@ RCT_EXPORT_MODULE(TrueSheetModule)
 }
 
 - (void)dismissAll:(BOOL)animated resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve(nil);
+}
+
+- (void)suspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
+  resolve(nil);
+}
+
+- (void)unsuspendAll:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject {
   resolve(nil);
 }
 

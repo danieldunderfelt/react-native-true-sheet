@@ -5,6 +5,7 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.module.annotations.ReactModule
 import com.facebook.react.uimanager.PixelUtil.dpToPx
+import com.facebook.react.uimanager.PointerEvents
 import com.facebook.react.uimanager.ReactStylesDiffMap
 import com.facebook.react.uimanager.StateWrapper
 import com.facebook.react.uimanager.ThemedReactContext
@@ -14,8 +15,10 @@ import com.facebook.react.uimanager.ViewManagerDelegate
 import com.facebook.react.uimanager.annotations.ReactProp
 import com.facebook.react.viewmanagers.TrueSheetViewManagerDelegate
 import com.facebook.react.viewmanagers.TrueSheetViewManagerInterface
+import com.lodev09.truesheet.core.AccessibilityOptions
 import com.lodev09.truesheet.core.GrabberOptions
 import com.lodev09.truesheet.events.*
+import com.lodev09.truesheet.utils.getColorOrNull
 
 /**
  * ViewManager for TrueSheetView - Fabric architecture
@@ -54,6 +57,20 @@ class TrueSheetViewManager :
 
   override fun getDelegate(): ViewManagerDelegate<TrueSheetView> = delegate
 
+  // The codegen delegate drops props outside the spec (pointerEvents comes from the
+  // host's style), so apply it here after the delegate pass.
+  override fun updateProperties(viewToUpdate: TrueSheetView, props: ReactStylesDiffMap) {
+    super.updateProperties(viewToUpdate, props)
+    if (props.hasKey("pointerEvents")) {
+      setPointerEvents(viewToUpdate, props.getString("pointerEvents"))
+    }
+  }
+
+  @ReactProp(name = "pointerEvents")
+  fun setPointerEvents(view: TrueSheetView, pointerEventsStr: String?) {
+    view.pointerEvents = PointerEvents.parsePointerEvents(pointerEventsStr)
+  }
+
   /**
    * Export custom direct event types for Fabric
    * Uses Kotlin native collections with decoupled event classes
@@ -65,6 +82,7 @@ class TrueSheetViewManager :
       DidPresentEvent.EVENT_NAME to hashMapOf("registrationName" to DidPresentEvent.REGISTRATION_NAME),
       WillDismissEvent.EVENT_NAME to hashMapOf("registrationName" to WillDismissEvent.REGISTRATION_NAME),
       DidDismissEvent.EVENT_NAME to hashMapOf("registrationName" to DidDismissEvent.REGISTRATION_NAME),
+      DismissAttemptEvent.EVENT_NAME to hashMapOf("registrationName" to DismissAttemptEvent.REGISTRATION_NAME),
       DetentChangeEvent.EVENT_NAME to hashMapOf("registrationName" to DetentChangeEvent.REGISTRATION_NAME),
       DragBeginEvent.EVENT_NAME to hashMapOf("registrationName" to DragBeginEvent.REGISTRATION_NAME),
       DragChangeEvent.EVENT_NAME to hashMapOf("registrationName" to DragChangeEvent.REGISTRATION_NAME),
@@ -95,6 +113,15 @@ class TrueSheetViewManager :
       .toCollection(detents)
 
     view.setDetents(detents)
+  }
+
+  @ReactProp(name = "detentBackgrounds")
+  override fun setDetentBackgrounds(view: TrueSheetView, value: ReadableArray?) {
+    view.setDetentBackgrounds(
+      (0 until (value?.size() ?: 0)).map { index ->
+        value?.getMap(index)?.getColorOrNull("color", view.context)
+      }
+    )
   }
 
   @ReactProp(name = "backgroundColor", customType = "Color")
@@ -130,10 +157,29 @@ class TrueSheetViewManager :
       } else {
         null
       },
-      color = if (options.hasKey("color") && !options.isNull("color")) options.getInt("color") else null,
+      color = options.getColorOrNull("color", view.context),
       adaptive = if (options.hasKey("adaptive")) options.getBoolean("adaptive") else true
     )
     view.setGrabberOptions(grabberOptions)
+  }
+
+  @ReactProp(name = "accessibilityOptions")
+  override fun setAccessibilityOptions(view: TrueSheetView, options: ReadableMap?) {
+    if (options == null) {
+      view.setAccessibilityOptions(null)
+      return
+    }
+
+    val accessibilityOptions = AccessibilityOptions(
+      grabberLabel = if (options.hasKey("grabberLabel")) options.getString("grabberLabel") else null,
+      expandedValue = if (options.hasKey("expandedValue")) options.getString("expandedValue") else null,
+      collapsedValue = if (options.hasKey("collapsedValue")) options.getString("collapsedValue") else null,
+      detentValue = if (options.hasKey("detentValue")) options.getString("detentValue") else null,
+      expandActionLabel = if (options.hasKey("expandActionLabel")) options.getString("expandActionLabel") else null,
+      collapseActionLabel = if (options.hasKey("collapseActionLabel")) options.getString("collapseActionLabel") else null,
+      paneTitle = if (options.hasKey("paneTitle")) options.getString("paneTitle") else null
+    )
+    view.setAccessibilityOptions(accessibilityOptions)
   }
 
   @ReactProp(name = "dismissible", defaultBoolean = true)
@@ -146,9 +192,24 @@ class TrueSheetViewManager :
     view.setDraggable(draggable)
   }
 
+  @ReactProp(name = "dismissThreshold")
+  override fun setDismissThreshold(view: TrueSheetView, value: String?) {
+    view.setDismissThreshold(value)
+  }
+
   @ReactProp(name = "dimmed", defaultBoolean = true)
   override fun setDimmed(view: TrueSheetView, dimmed: Boolean) {
     view.setDimmed(dimmed)
+  }
+
+  @ReactProp(name = "dimColor", customType = "Color")
+  override fun setDimColor(view: TrueSheetView, color: Int?) {
+    view.setDimColor(color)
+  }
+
+  @ReactProp(name = "dimOpacity", defaultDouble = -1.0)
+  override fun setDimOpacity(view: TrueSheetView, opacity: Double) {
+    view.setDimOpacity(opacity.toFloat())
   }
 
   @ReactProp(name = "dimmedDetentIndex", defaultInt = 0)
@@ -159,11 +220,17 @@ class TrueSheetViewManager :
   @ReactProp(name = "initialDetentIndex", defaultInt = -1)
   override fun setInitialDetentIndex(view: TrueSheetView, index: Int) {
     view.initialDetentIndex = index
+    view.presentInitialIfNeeded()
   }
 
   @ReactProp(name = "initialDetentAnimated", defaultBoolean = true)
   override fun setInitialDetentAnimated(view: TrueSheetView, animate: Boolean) {
     view.initialDetentAnimated = animate
+  }
+
+  @ReactProp(name = "suspended", defaultBoolean = false)
+  override fun setSuspended(view: TrueSheetView, suspended: Boolean) {
+    view.setSuspended(suspended)
   }
 
   @ReactProp(name = "maxContentHeight", defaultDouble = 0.0)
@@ -176,14 +243,14 @@ class TrueSheetViewManager :
     view.setMaxContentWidth(if (width > 0) width.dpToPx().toInt() else null)
   }
 
-  @ReactProp(name = "anchor")
-  override fun setAnchor(view: TrueSheetView, anchor: String?) {
-    view.setAnchor(anchor)
+  @ReactProp(name = "placement")
+  override fun setPlacement(view: TrueSheetView, placement: String?) {
+    view.setPlacement(placement)
   }
 
-  @ReactProp(name = "anchorOffset", defaultDouble = 0.0)
-  override fun setAnchorOffset(view: TrueSheetView, offset: Double) {
-    view.setAnchorOffset(if (offset > 0) offset.dpToPx().toInt() else 0)
+  @ReactProp(name = "placementOffset", defaultDouble = 0.0)
+  override fun setPlacementOffset(view: TrueSheetView, offset: Double) {
+    view.setPlacementOffset(if (offset > 0) offset.dpToPx().toInt() else 0)
   }
 
   @ReactProp(name = "backgroundBlur")
@@ -191,19 +258,14 @@ class TrueSheetViewManager :
     // iOS-specific prop - no-op on Android
   }
 
-  @ReactProp(name = "blurOptions")
-  override fun setBlurOptions(view: TrueSheetView, options: ReadableMap?) {
+  @ReactProp(name = "foldOptions")
+  override fun setFoldOptions(view: TrueSheetView, options: ReadableMap?) {
     // iOS-specific prop - no-op on Android
   }
 
   @ReactProp(name = "insetAdjustment")
   override fun setInsetAdjustment(view: TrueSheetView, insetAdjustment: String?) {
     view.setInsetAdjustment(insetAdjustment ?: "automatic")
-  }
-
-  @ReactProp(name = "scrollable", defaultBoolean = false)
-  override fun setScrollable(view: TrueSheetView, value: Boolean) {
-    view.setScrollable(value)
   }
 
   @ReactProp(name = "presentation")
@@ -216,6 +278,11 @@ class TrueSheetViewManager :
     view.setSheetElevation(elevation.toFloat())
   }
 
+  @ReactProp(name = "scrollableHandle", defaultInt = -1)
+  override fun setScrollableHandle(view: TrueSheetView, handle: Int) {
+    view.setScrollableHandle(handle)
+  }
+
   @ReactProp(name = "scrollableOptions")
   override fun setScrollableOptions(view: TrueSheetView, options: ReadableMap?) {
     if (options == null) {
@@ -225,16 +292,33 @@ class TrueSheetViewManager :
 
     val scrollableOptions = ScrollableOptions(
       keyboardScrollOffset = if (options.hasKey("keyboardScrollOffset")) options.getDouble("keyboardScrollOffset").toFloat() else 0f,
-      scrollingExpandsSheet = if (options.hasKey("scrollingExpandsSheet")) options.getBoolean("scrollingExpandsSheet") else true
+      keyboardOffset = if (options.hasKey("keyboardOffset")) options.getDouble("keyboardOffset").toFloat() else 0f,
+      scrollingExpandsSheet = if (options.hasKey("scrollingExpandsSheet")) options.getBoolean("scrollingExpandsSheet") else true,
+      contentInsetAdjustment = TrueSheetContentInsetAdjustment.fromString(
+        if (options.hasKey("contentInsetAdjustment")) options.getString("contentInsetAdjustment") else null
+      )
     )
     view.setScrollableOptions(scrollableOptions)
   }
 
+  @ReactProp(name = "headerOptions")
+  override fun setHeaderOptions(view: TrueSheetView, options: ReadableMap?) {
+    val position = if (options != null && options.hasKey("position")) options.getString("position") else null
+    view.setAbsoluteHeader(position == "absolute")
+  }
+
   @ReactProp(name = "footerOptions")
   override fun setFooterOptions(view: TrueSheetView, options: ReadableMap?) {
+    val position = if (options != null && options.hasKey("footerPosition")) options.getString("footerPosition") else null
+    view.setAbsoluteFooter(position == "absolute")
+
     val keyboardOffset =
       if (options != null && options.hasKey("keyboardOffset")) options.getDouble("keyboardOffset").toFloat() else 0f
     view.setFooterKeyboardOffset(keyboardOffset)
+
+    val avoidKeyboard =
+      if (options != null && options.hasKey("avoidKeyboard")) options.getBoolean("avoidKeyboard") else true
+    view.setFooterAvoidsKeyboard(avoidKeyboard)
   }
 
   companion object {

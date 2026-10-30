@@ -1,0 +1,349 @@
+import { TrueSheetActions, type TrueSheetActionType } from './actions';
+import type {
+  TrueSheetRouter,
+  TrueSheetRouterFactory,
+  TrueSheetRouterOptions,
+  TrueSheetRouterState,
+} from './types';
+
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const ensureBaseRoute = <T extends { routes: { name: string }[] }>(
+  state: T,
+  baseRouteName: string | undefined,
+  routeParamList: Record<string, object | undefined> | undefined
+): T & { index: number; routes: T['routes'] } => {
+  if (!baseRouteName) {
+    return state as T & { index: number; routes: T['routes'] };
+  }
+
+  const hasBaseRoute = state.routes.some((r) => r.name === baseRouteName);
+
+  if (!hasBaseRoute) {
+    const baseRoute = {
+      key: `${baseRouteName}-${uid()}`,
+      name: baseRouteName,
+      params: routeParamList?.[baseRouteName],
+    };
+
+    return {
+      ...state,
+      index: state.routes.length,
+      routes: [baseRoute, ...state.routes],
+    } as T & { index: number; routes: T['routes'] };
+  }
+
+  return state as T & { index: number; routes: T['routes'] };
+};
+
+type SheetRoute = {
+  key: string;
+  name: string;
+  closing?: boolean;
+  dismissing?: boolean;
+  pendingReplace?: SheetRoute;
+  resizeIndex?: number;
+  resizeKey?: number;
+};
+type SheetState = { key: string; index: number; routes: SheetRoute[] };
+
+/**
+ * Index of the route a `RESIZE` targets: the dispatching screen, else the focused route.
+ */
+export const getResizeRouteIndex = (
+  state: SheetState,
+  action: { source?: string; target?: string }
+): number =>
+  action.target === state.key && action.source
+    ? state.routes.findIndex((r) => r.key === action.source)
+    : state.index;
+
+/**
+ * Reduces the sheet-specific actions shared by every router flavour.
+ * Returns `undefined` for actions the base `StackRouter` should handle.
+ */
+export const getTrueSheetStateForAction = <State extends SheetState>(
+  state: State,
+  action: TrueSheetActionType
+): State | null | undefined => {
+  switch (action.type) {
+    case 'RESIZE': {
+      const routeIndex = getResizeRouteIndex(state, action);
+
+      return {
+        ...state,
+        routes: state.routes.map((route, i) =>
+          i === routeIndex
+            ? {
+                ...route,
+                resizeIndex: action.index,
+                resizeKey: (route.resizeKey ?? 0) + 1,
+              }
+            : route
+        ),
+      };
+    }
+
+    case 'GO_BACK':
+    case 'DISMISS': {
+      return getTrueSheetStateForAction(state, TrueSheetActions.pop(1));
+    }
+
+    case 'POP': {
+      // Only base screen remains - let parent navigator handle it
+      if (state.routes.length <= 1) {
+        return null;
+      }
+
+      const count =
+        'payload' in action && typeof action.payload?.count === 'number' ? action.payload.count : 1;
+
+      // Calculate how many routes we can actually pop (don't pop base screen)
+      const maxPopCount = state.routes.length - 1;
+      const actualCount = Math.min(count, maxPopCount);
+
+      // Base screen - let parent navigator handle it
+      if (actualCount <= 0) {
+        return null;
+      }
+
+      // Target index is the route we want to stay on (land on after pop)
+      // closingIndex is the first route to be dismissed (the one after target)
+      const targetIndex = state.routes.length - 1 - actualCount;
+      const closingIndex = targetIndex + 1;
+
+      // Mark only the bottom-most route to pop as closing
+      // The sheet's dismiss() will handle dismissing sheets above it first.
+      // The index stays on the top sheet until REMOVE: Expo Router 58 treats the routes
+      // after `index` as preloaded.
+      return {
+        ...state,
+        routes: state.routes.map((route, i) => {
+          if (i === closingIndex) return { ...route, closing: true };
+          if (i > closingIndex) return { ...route, dismissing: true };
+          return route;
+        }),
+      };
+    }
+
+    case 'POP_TO_TOP': {
+      const popCount = state.routes.length - 1;
+      return getTrueSheetStateForAction(state, TrueSheetActions.pop(popCount));
+    }
+
+    case 'POP_TO': {
+      const targetName =
+        'payload' in action && typeof action.payload?.name === 'string'
+          ? action.payload.name
+          : null;
+
+      if (!targetName) {
+        return null;
+      }
+
+      const targetIndex = state.routes.findIndex((r) => r.name === targetName);
+
+      // Target not found or is the current route
+      if (targetIndex === -1 || targetIndex >= state.index) {
+        return null;
+      }
+
+      const popCount = state.routes.length - 1 - targetIndex;
+      return getTrueSheetStateForAction(state, TrueSheetActions.pop(popCount));
+    }
+
+    case 'REMOVE': {
+      // Actually remove the closing route and all routes above it
+      const routeKey = action.source;
+      const routeIndex = routeKey
+        ? state.routes.findIndex((r) => r.key === routeKey)
+        : state.routes.findIndex((r) => r.closing);
+
+      if (routeIndex === -1) {
+        return state;
+      }
+
+      // Remove the route and the routes dismissed with it. A popped route keeps the
+      // routes pushed after the pop started: they aren't stacked on it natively.
+      const removed = state.routes[routeIndex]!;
+      const isPopped = removed.closing || removed.dismissing;
+      const routes = state.routes.filter(
+        (route, i) => i < routeIndex || (i > routeIndex && isPopped && !route.dismissing)
+      );
+
+      // A replaced sheet hands its slot to the replacement once it has dismissed
+      if (removed.pendingReplace) {
+        routes.splice(routeIndex, 0, removed.pendingReplace as State['routes'][number]);
+      }
+
+      return {
+        ...state,
+        index: Math.min(state.index, routes.length - 1),
+        routes,
+      };
+    }
+
+    default:
+      return undefined;
+  }
+};
+
+/**
+ * Defers a `REPLACE` of the top sheet until it has dismissed: the sheet is marked closing with
+ * the replacement attached, and the `REMOVE` its dismissal dispatches splices the replacement in.
+ * Swapping both routes in one commit unmounts one native sheet while the next mounts, which
+ * glitches natively. `replaced` is the base router's state for the action, so the replacement
+ * gets the base router's key and params. Returns `undefined` when the action isn't a sheet
+ * `REPLACE` (the base route, or a route below the top sheet).
+ */
+export const getStateForReplaceSheet = <State extends SheetState>(
+  state: State,
+  action: { type: string },
+  replaced: State
+): State | undefined => {
+  const topIndex = state.routes.length - 1;
+  const top = state.routes[topIndex];
+  const replacement = replaced.routes[topIndex];
+
+  if (
+    action.type !== 'REPLACE' ||
+    topIndex < 1 ||
+    !top ||
+    top.closing ||
+    top.dismissing ||
+    !replacement ||
+    replacement.key === top.key
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...state,
+    routes: state.routes.map((route, i) =>
+      i === topIndex ? { ...route, closing: true, pendingReplace: replacement } : route
+    ),
+  };
+};
+
+const BASE_ROUTE_ACTIONS = new Set([
+  'NAVIGATE',
+  'NAVIGATE_DEPRECATED',
+  'PUSH',
+  'REPLACE',
+  'POP_TO',
+]);
+
+/**
+ * Reduces an action that targets the base route by name. React Navigation 7 adds another base
+ * route for a `PUSH`, a `REPLACE` or a `NAVIGATE` without `pop`, which presents the base screen
+ * as a sheet, and this router's `POP_TO` drops the params and nested state. This goes back to it
+ * instead: `getPoppedState` reduces the action as a `NAVIGATE` with `pop` (a `PUSH` ignores
+ * `pop`) to update the base route (params, nested state), then the sheets above it are dismissed.
+ * Returns `undefined` for other actions, a `REPLACE` with no sheet (it swaps the base route), or
+ * when the base router doesn't land on the base route.
+ */
+export const getStateForNavigateToBase = <State extends SheetState>(
+  state: State,
+  action: TrueSheetActionType,
+  getPoppedState: (action: TrueSheetActionType) => State | null | undefined
+): State | undefined => {
+  const { type, payload } = action as { type: string; payload?: { name?: string } };
+  const baseRoute = state.routes[0]!;
+  const hasSheets = state.routes.length > 1;
+
+  if (
+    !BASE_ROUTE_ACTIONS.has(type) ||
+    payload?.name !== baseRoute.name ||
+    (type === 'REPLACE' && !hasSheets)
+  ) {
+    return undefined;
+  }
+
+  const popped = getPoppedState({
+    ...action,
+    type: 'NAVIGATE',
+    payload: { ...payload, pop: true },
+  } as unknown as TrueSheetActionType);
+  const base = popped?.routes[popped.index];
+
+  if (base?.key !== baseRoute.key) {
+    return undefined;
+  }
+
+  if (!hasSheets) {
+    return popped!;
+  }
+
+  return getTrueSheetStateForAction(
+    { ...state, routes: [base, ...state.routes.slice(1)] },
+    TrueSheetActions.pop(state.routes.length - 1)
+  )!;
+};
+
+export const createTrueSheetRouter =
+  (stackRouter: TrueSheetRouterFactory) =>
+  (routerOptions: TrueSheetRouterOptions): TrueSheetRouter => {
+    const baseRouter = stackRouter(routerOptions);
+
+    return {
+      ...baseRouter,
+      type: 'true-sheet',
+
+      getInitialState(options) {
+        const state = baseRouter.getInitialState(options);
+        const baseRouteName = routerOptions.initialRouteName ?? options.routeNames[0];
+        const stateWithBaseRoute = ensureBaseRoute(state, baseRouteName, options.routeParamList);
+
+        return {
+          ...stateWithBaseRoute,
+          stale: false,
+          type: 'true-sheet',
+          key: `true-sheet-${uid()}`,
+        };
+      },
+
+      getStateForAction(state, action, options) {
+        const result =
+          getStateForNavigateToBase(
+            state,
+            action,
+            // NAVIGATE never returns a partial state
+            (popAction) =>
+              baseRouter.getStateForAction(state, popAction, options) as TrueSheetRouterState | null
+          ) ?? getTrueSheetStateForAction(state, action);
+
+        if (result !== undefined) {
+          return result;
+        }
+
+        const next = baseRouter.getStateForAction(state, action, options);
+        // REPLACE never returns a partial state
+        return (
+          (next && getStateForReplaceSheet(state, action, next as TrueSheetRouterState)) ?? next
+        );
+      },
+
+      getRehydratedState(partialState, { routeNames, routeParamList, routeGetIdList }) {
+        if (partialState.stale === false) {
+          return partialState;
+        }
+
+        const state = baseRouter.getRehydratedState(partialState, {
+          routeNames,
+          routeParamList,
+          routeGetIdList,
+        });
+
+        const baseRouteName = routerOptions.initialRouteName ?? routeNames[0];
+        const stateWithBaseRoute = ensureBaseRoute(state, baseRouteName, routeParamList);
+
+        return {
+          ...stateWithBaseRoute,
+          type: 'true-sheet',
+          key: `true-sheet-${uid()}`,
+        };
+      },
+
+      actionCreators: TrueSheetActions,
+    };
+  };

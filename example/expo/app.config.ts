@@ -7,12 +7,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   name: 'TrueSheetExpoExample',
   slug: 'TrueSheetExpoExample',
   version: '1.0.0',
-  orientation: 'portrait',
+  orientation: 'default',
   icon: './assets/images/icon.png',
   scheme: 'expoexample',
   userInterfaceStyle: 'automatic',
   ios: {
     supportsTablet: true,
+    requireFullScreen: false,
     bundleIdentifier: 'com.lodev09.truesheet.expo',
   },
   android: {
@@ -31,6 +32,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-router',
     'expo-font',
     'expo-web-browser',
+    [
+      'expo-build-properties',
+      {
+        ios: {
+          enableSceneSupport: true,
+        },
+      },
+    ],
     [
       'expo-splash-screen',
       {

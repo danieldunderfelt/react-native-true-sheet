@@ -1,0 +1,79 @@
+---
+title: Overlays on Sheets
+description: Display toasts, dialogs, and other overlays on top of bottom sheets.
+keywords: [bottom sheet overlay, bottom sheet toast, bottom sheet dialog, portal, z-index]
+---
+
+Sheets are presented natively, above the React Native view hierarchy — so a toast or dialog rendered in your app's tree (or through a JS portal) ends up **behind** the sheet.
+
+`TrueSheetOverlay` renders its children in a native layer above every presented sheet.
+
+<Preview label="Overlays on sheets" src="/img/previews/overlays.mp4" />
+
+## How?
+
+Wrap the content with `TrueSheetOverlay` and show or hide it by conditionally rendering children — there is no `visible` prop.
+
+```tsx {14-16}
+import { TrueSheet, TrueSheetOverlay } from '@lodev09/react-native-true-sheet'
+
+const App = () => {
+  const [toast, setToast] = useState<string | null>(null)
+
+  return (
+    <>
+      <TrueSheet>
+        <Button title="Save" onPress={() => setToast('Saved!')} />
+      </TrueSheet>
+
+      <TrueSheetOverlay>
+        {toast && <Toast message={toast} onHide={() => setToast(null)} />}
+      </TrueSheetOverlay>
+    </>
+  )
+}
+```
+
+The overlay can be mounted anywhere — on a screen, or inside a sheet's content.
+
+## Touches
+
+Touches that miss the overlay's children pass through to whatever is beneath, so the sheet stays draggable and its buttons stay tappable around a toast.
+
+To block interaction (e.g. a dialog with a backdrop), render a child that fills the overlay:
+
+```tsx
+<TrueSheetOverlay>
+  {visible && (
+    <Pressable style={StyleSheet.absoluteFill} onPress={close}>
+      <Dialog />
+    </Pressable>
+  )}
+</TrueSheetOverlay>
+```
+
+## Layout
+
+The overlay is a transparent container that fills the window. Position children absolutely, or lay them out with flex and padding through `style`:
+
+```tsx
+<TrueSheetOverlay style={{ justifyContent: 'flex-end', padding: 16 }}>
+  <Toast />
+</TrueSheetOverlay>
+```
+
+:::note
+The overlay itself never renders — visual styles like `backgroundColor` have no effect on it. Style its children instead.
+:::
+
+Since it fills the window, content may sit under the status bar or the system navigation bar. Use `useSafeAreaInsets` from `react-native-safe-area-context` to inset it.
+
+## Limitations
+
+- Native modals presented **after** the overlay — React Native's `Modal`, native-stack modal screens — render above it.
+- The keyboard always renders above the overlay.
+- `react-native-screens` containers — native stacks, bottom tabs, drawers — are not supported inside the overlay. On Android they crash with the same error described in [Nesting Navigators in Sheets](./navigation#nesting-navigators-in-sheets).
+
+## Platform Support
+
+`TrueSheetOverlay` is supported on **iOS**, **Android**, and **Web**.

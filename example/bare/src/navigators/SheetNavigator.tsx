@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { TrueSheet } from '@lodev09/react-native-true-sheet';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
@@ -7,20 +7,14 @@ import {
   createTrueSheetNavigator,
   useTrueSheetNavigation,
 } from '@lodev09/react-native-true-sheet/navigation';
-import { Button, DemoContent, Footer } from '@example/shared/components';
-import {
-  BLUE,
-  DARK,
-  DARK_BLUE,
-  FOOTER_HEIGHT,
-  GAP,
-  LIGHT_GRAY,
-  SPACING,
-} from '@example/shared/utils';
+import { Button, DemoContent, Footer, Header } from '@example/shared/components';
+import { BLUE, DARK, DARK_BLUE, DARK_GRAY, GAP, LIGHT_GRAY, SPACING } from '@example/shared/utils';
 import type { AppStackParamList, SheetHomeStackParamList, SheetStackParamList } from '../types';
 import {
   NotificationsSheetContent,
+  PeekSheetContent,
   ProfileSheetContent,
+  ScrollableSheetContent,
   SettingsSheetContent,
   TestScreen,
 } from '@example/shared/screens';
@@ -42,6 +36,9 @@ const HomeScreen = () => {
       </View>
       <Button text="Open Details Sheet" onPress={() => navigation.navigate('Details')} />
       <Button text="Open Settings Sheet" onPress={() => navigation.navigate('Settings')} />
+      <Button text="Open Scrollable Sheet" onPress={() => navigation.navigate('Scrollable')} />
+      <Button text="Open Small Footer Sheet" onPress={() => navigation.navigate('SmallFooter')} />
+      <Button text="Open Peek Sheet" onPress={() => navigation.navigate('Peek')} />
       <Button text="Navigate to Test" onPress={() => navigation.navigate('Test')} />
       <Button text="Go Back" onPress={() => navigation.goBack()} />
     </View>
@@ -79,13 +76,17 @@ const DetailsSheet = () => {
   }, [navigation]);
 
   return (
-    <View style={[styles.sheetContent, { paddingBottom: FOOTER_HEIGHT + SPACING }]}>
+    <View style={styles.sheetContent}>
       <Text style={styles.sheetTitle}>Details Sheet</Text>
       <Text style={styles.sheetSubtitle}>This is a sheet screen using react-navigation.</Text>
       <DemoContent />
       <View style={styles.buttons}>
         <Button text="Resize to 100%" onPress={() => navigation.resize(1)} />
         <Button text="Open Settings" onPress={() => navigation.navigate('Settings')} />
+        <Button
+          text="Go to Test (base)"
+          onPress={() => navigation.navigate('SheetHomeStack', { screen: 'Test' })}
+        />
         <Button text="Go Back" onPress={() => navigation.goBack()} />
       </View>
       <TrueSheet ref={sheetRef} cornerRadius={12} detents={['auto']} backgroundColor={DARK}>
@@ -95,6 +96,58 @@ const DetailsSheet = () => {
         </View>
       </TrueSheet>
     </View>
+  );
+};
+
+// Repro: on iOS 26 a small auto detent (<= 150) resolves the footer's bottom
+// inset to 0, but the late-mounted footer's first layout is seeded with the
+// full window inset — watch for the footer shrinking right after present.
+const SmallFooter = () => (
+  <View style={styles.smallFooter}>
+    <Text style={styles.smallFooterText}>SMALL FOOTER</Text>
+  </View>
+);
+
+const SmallFooterSheet = () => {
+  const navigation = useTrueSheetNavigation<AppStackParamList & SheetStackParamList>();
+
+  useEffect(() => {
+    navigation.setOptions({
+      footer: <SmallFooter />,
+      footerStyle: { backgroundColor: DARK_BLUE },
+    });
+  }, [navigation]);
+
+  return (
+    <View style={styles.sheetContent}>
+      <Text style={styles.sheetTitle}>Small Footer Sheet</Text>
+      <Text style={styles.sheetSubtitle}>Small auto detent with a late-mounted footer.</Text>
+    </View>
+  );
+};
+
+const PeekSheet = () => {
+  const navigation = useTrueSheetNavigation<AppStackParamList & SheetStackParamList>();
+
+  return <PeekSheetContent onPop={() => navigation.pop()} />;
+};
+
+// Scrolling content in a sheet screen — the ScrollView is created here, so it's
+// plugged into the sheet via `setOptions` instead of the static screen options.
+const ScrollableSheet = () => {
+  const navigation = useTrueSheetNavigation<AppStackParamList & SheetStackParamList>();
+  const scrollableRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    navigation.setOptions({ scrollableRef });
+  }, [navigation]);
+
+  return (
+    <ScrollableSheetContent
+      scrollableRef={scrollableRef}
+      onResize={() => navigation.resize(1)}
+      onPop={() => navigation.pop()}
+    />
   );
 };
 
@@ -165,11 +218,6 @@ export const SheetNavigator = () => {
         sheetDragEnd: (e) => {
           console.log(`[SheetNavigator] sheetDragEnd: index=${e.data.index}`);
         },
-        // sheetPositionChange: (e) => {
-        //   console.log(
-        //     `[SheetNavigator] sheetPositionChange: position=${e.data.position.toFixed(0)}, realtime=${e.data.realtime}`
-        //   );
-        // },
         sheetWillFocus: () => {
           console.log('[SheetNavigator] sheetWillFocus');
         },
@@ -204,10 +252,6 @@ export const SheetNavigator = () => {
           backgroundColor: DARK,
           cornerRadius: 16,
           reanimated: true,
-          // positionChangeHandler: (payload) => {
-          //   'worklet';
-          //   console.log(payload.position);
-          // },
         }}
       />
       <SheetStack.Screen
@@ -226,6 +270,45 @@ export const SheetNavigator = () => {
           detents: ['auto', 1],
           backgroundColor: DARK,
           cornerRadius: 16,
+        }}
+      />
+      <SheetStack.Screen
+        name="Scrollable"
+        component={ScrollableSheet}
+        options={{
+          detents: [0.6, 1],
+          backgroundColor: DARK,
+          cornerRadius: 16,
+          style: styles.scrollableSheet,
+          header: <Header />,
+          headerOptions: { position: 'absolute' },
+          footer: <Footer />,
+          footerStyle: styles.scrollableFooter,
+          footerOptions: { position: 'absolute' },
+          scrollableOptions: {
+            topScrollEdgeEffect: 'soft',
+            bottomScrollEdgeEffect: 'soft',
+          },
+        }}
+      />
+      <SheetStack.Screen
+        name="SmallFooter"
+        component={SmallFooterSheet}
+        options={{
+          detents: ['auto'],
+          backgroundColor: DARK,
+          cornerRadius: 16,
+        }}
+      />
+      <SheetStack.Screen
+        name="Peek"
+        component={PeekSheet}
+        options={{
+          detents: ['peek', 1],
+          backgroundColor: DARK,
+          cornerRadius: 16,
+          style: styles.peekSheet,
+          header: <Header />,
         }}
       />
     </SheetStack.Navigator>
@@ -270,5 +353,26 @@ const styles = StyleSheet.create({
   buttons: {
     gap: GAP,
     marginTop: SPACING,
+  },
+  scrollableSheet: {
+    flex: 1,
+  },
+  peekSheet: {
+    flex: 1,
+  },
+  // Transparent on iOS so the scroll edge effect shows through
+  scrollableFooter: {
+    backgroundColor: Platform.select({ default: DARK_GRAY, ios: undefined }),
+  },
+  smallFooter: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: SPACING / 2,
+  },
+  smallFooterText: {
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 1,
+    color: 'white',
   },
 });

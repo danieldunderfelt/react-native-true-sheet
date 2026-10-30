@@ -1,0 +1,15 @@
+{
+  "title": "4.0.0",
+  "description": "Latest",
+  "root": "version",
+  "pages": [
+    "intro",
+    "install",
+    "usage",
+    "migration",
+    "migration-v3",
+    "guides",
+    "reference",
+    "troubleshooting"
+  ]
+}

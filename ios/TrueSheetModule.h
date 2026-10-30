@@ -27,15 +27,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 /**
  * Register a sheet component view with its React tag
- * Called automatically by TrueSheetView during initialization
+ * Called automatically by TrueSheetView during its mount transaction.
+ * The registry holds views weakly, so deallocated hosts drop out on their own.
  */
 + (void)registerView:(TrueSheetView *)view withTag:(NSNumber *)tag;
 
 /**
- * Unregister a sheet component view
- * Called automatically by TrueSheetView during dealloc
+ * Unregister a recycled host, which stays alive in the pool and would
+ * otherwise keep resolving its previous tag. No-op if the tag maps elsewhere.
  */
-+ (void)unregisterViewWithTag:(NSNumber *)tag;
++ (void)unregisterView:(TrueSheetView *)view withTag:(NSNumber *)tag;
 
 @end
 

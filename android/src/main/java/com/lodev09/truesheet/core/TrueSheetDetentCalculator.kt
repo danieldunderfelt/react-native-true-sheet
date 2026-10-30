@@ -15,11 +15,30 @@ interface TrueSheetDetentCalculatorDelegate {
   val detents: MutableList<Double>
   val contentHeight: Int
   val headerHeight: Int
+  val absoluteHeader: Boolean
   val footerHeight: Int
+  val absoluteFooter: Boolean
+
+  /**
+   * True while the plugged scrollable is padded by the absolute footer's
+   * height (see ScrollableOptions.footerInsetAdjustment) — the footer then
+   * counts toward the auto detent like a relative one, so the content ends
+   * above it.
+   */
+  val footerInsetAdjustment: Boolean
+  val footerAvoidsKeyboard: Boolean
   val peekContentHeight: Int
   val contentBottomInset: Int
   val maxContentHeight: Int?
   val keyboardInset: Int
+  val topInset: Int
+
+  /**
+   * True while the keyboard holds the sheet up: the collapsed stop then sits at
+   * the keyboard-free first detent (the "floor") so a drag-down dismisses the
+   * keyboard before it can dismiss the sheet.
+   */
+  val hasKeyboardFloor: Boolean
 }
 
 /**
@@ -33,20 +52,57 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
   private val realScreenHeight: Int get() = delegate?.realScreenHeight ?: 0
   private val detents: List<Double> get() = delegate?.detents ?: emptyList()
   private val contentHeight: Int get() = delegate?.contentHeight ?: 0
+
   private val headerHeight: Int get() = delegate?.headerHeight ?: 0
   private val footerHeight: Int get() = delegate?.footerHeight ?: 0
   private val peekContentHeight: Int get() = delegate?.peekContentHeight ?: 0
   private val contentBottomInset: Int get() = delegate?.contentBottomInset ?: 0
   private val maxContentHeight: Int? get() = delegate?.maxContentHeight
   private val keyboardInset: Int get() = delegate?.keyboardInset ?: 0
+  private val topInset: Int get() = delegate?.topInset ?: 0
+  private val hasKeyboardFloor: Boolean get() = delegate?.hasKeyboardFloor == true
+
+  /**
+   * An absolute footer floats over the content and contributes no height to
+   * the auto detent — unless it pads the scrollable, then the content ends
+   * above it like a relative footer.
+   */
+  private val footerInAuto: Boolean
+    get() = delegate?.absoluteFooter == false || delegate?.footerInsetAdjustment == true
+
+  /**
+   * Height for auto (-1.0) detents: content + header + footer height.
+   * An absolute (floating) header or footer overlaps the content, so it contributes no height.
+   */
+  private val autoDetentHeight: Int
+    get() = contentHeight +
+      (if (delegate?.absoluteHeader == true) 0 else headerHeight) +
+      (if (footerInAuto) footerHeight else 0)
+
+  /**
+   * Bottom inset for auto detents. A footer counted in the auto height owns
+   * the sheet's bottom edge, so it absorbs the inset instead of adding it.
+   */
+  private val autoDetentBottomInset: Int
+    get() = if (footerHeight > 0 && footerInAuto) 0 else contentBottomInset
+
+  /**
+   * Bottom inset for peek detents. An absolute footer counts toward the peek
+   * height and absorbs the inset, so it isn't added again.
+   */
+  private val peekDetentBottomInset: Int
+    get() = if (footerHeight > 0 && delegate?.absoluteFooter == true) 0 else contentBottomInset
 
   /**
    * Height for peek (-2.0) detents: header + footer + peek content height.
+   * A relative footer is pushed off-screen at peek, so it contributes no height.
    * Falls back to 150dp when none is present.
    */
   private val peekDetentHeight: Int
     get() {
-      val height = headerHeight + footerHeight + peekContentHeight
+      val height = headerHeight +
+        (if (delegate?.absoluteFooter == true) footerHeight else 0) +
+        peekContentHeight
       return if (height > 0) height else DEFAULT_PEEK_HEIGHT.dpToPx().toInt()
     }
 
@@ -56,9 +112,9 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
    */
   fun getDetentHeight(detent: Double, includeKeyboard: Boolean = true): Int {
     val baseHeight = if (detent == -1.0) {
-      contentHeight + headerHeight + contentBottomInset
+      autoDetentHeight + autoDetentBottomInset
     } else if (detent == -2.0) {
-      peekDetentHeight + contentBottomInset
+      peekDetentHeight + peekDetentBottomInset
     } else {
       if (detent <= 0.0 || detent > 1.0) {
         throw IllegalArgumentException("TrueSheet: detent fraction ($detent) must be between 0 and 1")
@@ -66,9 +122,35 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
       (detent * screenHeight).toInt() + contentBottomInset
     }
 
-    val height = if (includeKeyboard) baseHeight + keyboardInset else baseHeight
+    val keyboardHeight = if (includeKeyboard) keyboardInset else 0
+    val footerKeyboardOverlap = if (detent == -1.0 &&
+      delegate?.absoluteFooter == true &&
+      footerInAuto &&
+      delegate?.footerAvoidsKeyboard == false
+    ) {
+      minOf(keyboardHeight, maxOf(0, footerHeight - contentBottomInset))
+    } else {
+      0
+    }
+    val height = baseHeight + keyboardHeight - footerKeyboardOverlap
     val maxAllowedHeight = screenHeight + contentBottomInset
     return maxContentHeight?.let { minOf(height, it, maxAllowedHeight) } ?: minOf(height, maxAllowedHeight)
+  }
+
+  fun getBackgroundIndex(sheetTop: Int, displayedIndex: Int): Int {
+    if (detents.isEmpty()) return -1
+
+    val height = getVisibleSheetHeight(sheetTop)
+    var nextIndex = displayedIndex.coerceIn(0, detents.size - 1)
+    var distance = kotlin.math.abs(height - getVisibleSheetHeight(getSheetTopForDetentIndex(nextIndex)))
+    for (index in detents.indices) {
+      val nextDistance = kotlin.math.abs(height - getVisibleSheetHeight(getSheetTopForDetentIndex(index)))
+      if (nextDistance < distance) {
+        nextIndex = index
+        distance = nextDistance
+      }
+    }
+    return nextIndex
   }
 
   /**
@@ -79,7 +161,31 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
       RNLog.w(reactContext, "TrueSheet: Detent index ($index) is out of bounds (0..${detents.size - 1})")
       return realScreenHeight
     }
-    return realScreenHeight - getDetentHeight(detents[index])
+    // With a keyboard floor only the last detent stays keyboard-shifted — it's
+    // the keyboard-expanded resting position; the stops below it are keyboard-free
+    val isKeyboardFreeStop = hasKeyboardFloor && index != detents.size - 1
+    return getSheetTop(detents[index], includeKeyboard = !isKeyboardFreeStop)
+  }
+
+  /**
+   * Top of the lowest stop the sheet can rest at: the keyboard floor while it's
+   * active, else the first detent.
+   */
+  fun getLowestSheetTop(): Int = if (hasKeyboardFloor) getSheetTop(detents[0], includeKeyboard = false) else getSheetTopForDetentIndex(0)
+
+  /**
+   * Top of the half stop while the keyboard floor is active: the keyboard-free
+   * second detent, or the floor itself for a single detent.
+   */
+  fun getKeyboardHalfStopTop(): Int = getSheetTop(detents[minOf(1, detents.size - 1)], includeKeyboard = false)
+
+  // Clamp to the space the sheet can actually occupy — matching
+  // setupSheetDetents. A keyboard-inflated detent height can exceed it,
+  // placing the expected top above the screen while the real sheet stops
+  // at the top inset.
+  private fun getSheetTop(detent: Double, includeKeyboard: Boolean = true): Int {
+    val maxAvailableHeight = realScreenHeight - topInset
+    return realScreenHeight - minOf(getDetentHeight(detent, includeKeyboard), maxAvailableHeight)
   }
 
   /**
@@ -99,7 +205,7 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
     if (index < 0 || index >= detents.size) return 0f
     val value = detents[index]
     return if (value == -1.0) {
-      (contentHeight + headerHeight).toFloat() / screenHeight.toFloat()
+      autoDetentHeight.toFloat() / screenHeight.toFloat()
     } else if (value == -2.0) {
       peekDetentHeight.toFloat() / screenHeight.toFloat()
     } else {
@@ -116,6 +222,9 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
    */
   fun getStateForDetentIndex(index: Int): Int {
     val stateMap = getDetentStateMap() ?: return BottomSheetBehavior.STATE_HIDDEN
+    // With a keyboard floor the keyboard-expanded last detent lives at the
+    // expanded stop — the half stop (which may share its index) is keyboard-free
+    if (hasKeyboardFloor && index == detents.size - 1) return BottomSheetBehavior.STATE_EXPANDED
     return stateMap.entries.find { it.value == index }?.key ?: BottomSheetBehavior.STATE_HIDDEN
   }
 
@@ -133,8 +242,12 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
    */
   private fun getDetentStateMap(): Map<Int, Int>? =
     when (detents.size) {
+      // With one detent halfExpandedRatio matches the peek height, so the
+      // behavior can settle HALF_EXPANDED at the same position (e.g. an upward
+      // drag release) — map it too, or the settle is unmappable
       1 -> mapOf(
         BottomSheetBehavior.STATE_COLLAPSED to 0,
+        BottomSheetBehavior.STATE_HALF_EXPANDED to 0,
         BottomSheetBehavior.STATE_EXPANDED to 0
       )
 
@@ -161,16 +274,18 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
    * Find which segment the position falls into for interpolation.
    * @return Triple(fromIndex, toIndex, progress) where progress is 0-1, or null if no detents
    */
-  fun findSegmentForPosition(positionPx: Int): Triple<Int, Int, Float>? {
+  private fun findSegmentForPosition(positionPx: Int): Triple<Int, Int, Float>? {
     val count = detents.size
     if (count == 0) return null
 
-    val firstPos = getSheetTopForDetentIndex(0)
+    // A single keyboard-shifted detent can rest down at its keyboard floor —
+    // that range is still index 0, not a dismissal
+    val floorPos = getLowestSheetTop()
 
-    // Position is below first detent (sheet is being dragged down to dismiss)
-    if (positionPx > firstPos) {
-      val range = realScreenHeight - firstPos
-      val progress = if (range > 0) (positionPx - firstPos).toFloat() / range else 0f
+    // Position is below the lowest stop (sheet is being dragged down to dismiss)
+    if (positionPx > floorPos) {
+      val range = realScreenHeight - floorPos
+      val progress = if (range > 0) (positionPx - floorPos).toFloat() / range else 0f
       return Triple(-1, 0, progress)
     }
 
@@ -187,6 +302,10 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
       val pos = getSheetTopForDetentIndex(i)
       val nextPos = getSheetTopForDetentIndex(i + 1)
 
+      // Skip degenerate segments — keyboard growth can clamp adjacent detents
+      // to the same top; falling through reports the topmost detent
+      if (pos == nextPos) continue
+
       if (positionPx in nextPos..pos) {
         val range = pos - nextPos
         val progress = if (range > 0) (pos - positionPx).toFloat() / range else 0f
@@ -198,37 +317,23 @@ class TrueSheetDetentCalculator(private val reactContext: ThemedReactContext) {
   }
 
   /**
-   * Returns continuous index (e.g., 0.5 = halfway between detent 0 and 1).
+   * Returns interpolated continuous index (e.g., 0.5 = halfway between detent
+   * 0 and 1) and screen fraction for a position, sharing a single segment
+   * lookup — this runs on every position frame.
    */
-  fun getInterpolatedIndexForPosition(positionPx: Int): Float {
-    val count = detents.size
-    if (count == 0) return -1f
+  fun getInterpolatedPositionInfo(positionPx: Int): Pair<Float, Float> {
+    if (detents.isEmpty()) return Pair(-1f, 0f)
 
-    val segment = findSegmentForPosition(positionPx) ?: return 0f
-    val (fromIndex, _, progress) = segment
-
-    if (fromIndex == -1) return -progress
-    return fromIndex + progress
-  }
-
-  /**
-   * Returns interpolated screen fraction for position.
-   */
-  fun getInterpolatedDetentForPosition(positionPx: Int): Float {
-    val count = detents.size
-    if (count == 0) return 0f
-
-    val segment = findSegmentForPosition(positionPx) ?: return getDetentValueForIndex(0)
-    val (fromIndex, toIndex, progress) = segment
+    val (fromIndex, toIndex, progress) = findSegmentForPosition(positionPx)
+      ?: return Pair(0f, getDetentValueForIndex(0))
 
     if (fromIndex == -1) {
-      val firstDetent = getDetentValueForIndex(0)
-      return maxOf(0f, firstDetent * (1 - progress))
+      return Pair(-progress, maxOf(0f, getDetentValueForIndex(0) * (1 - progress)))
     }
 
     val fromDetent = getDetentValueForIndex(fromIndex)
     val toDetent = getDetentValueForIndex(toIndex)
-    return fromDetent + progress * (toDetent - fromDetent)
+    return Pair(fromIndex + progress, fromDetent + progress * (toDetent - fromDetent))
   }
 
   companion object {

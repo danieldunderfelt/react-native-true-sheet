@@ -1,24 +1,9 @@
-import { withLayoutContext } from 'expo-router';
-import {
-  createTrueSheetNavigator,
-  type TrueSheetNavigationEventMap,
-  type TrueSheetNavigationOptions,
-  type TrueSheetNavigationState,
-} from '@lodev09/react-native-true-sheet/navigation';
+import { Platform, StyleSheet } from 'react-native';
+import { Sheet } from '@lodev09/react-native-true-sheet/navigation/expo-router';
 
-import { DARK } from '@example/shared/utils';
+import { Footer, Header } from '@example/shared/components';
+import { DARK, DARK_GRAY } from '@example/shared/utils';
 import { TrueSheetProvider } from '@lodev09/react-native-true-sheet';
-
-type ParamListBase = Record<string, object | undefined>;
-
-const { Navigator } = createTrueSheetNavigator();
-
-export const Sheet = withLayoutContext<
-  TrueSheetNavigationOptions,
-  typeof Navigator,
-  TrueSheetNavigationState<ParamListBase>,
-  TrueSheetNavigationEventMap
->(Navigator);
 
 export const unstable_settings = {
   initialRouteName: 'index',
@@ -100,7 +85,56 @@ export default function SheetStackLayout() {
             cornerRadius: 16,
           }}
         />
+        <Sheet.Screen
+          name="scrollable"
+          options={{
+            detents: [0.6, 1],
+            backgroundColor: DARK,
+            cornerRadius: 16,
+            style: styles.scrollableSheet,
+            header: <Header />,
+            headerOptions: { position: 'absolute' },
+            footer: <Footer />,
+            footerStyle: styles.scrollableFooter,
+            footerOptions: { position: 'absolute' },
+            scrollableOptions: {
+              topScrollEdgeEffect: 'soft',
+              bottomScrollEdgeEffect: 'soft',
+            },
+          }}
+        />
+        <Sheet.Screen
+          name="small-footer"
+          options={{
+            detents: ['auto'],
+            backgroundColor: DARK,
+            cornerRadius: 16,
+          }}
+        />
+        <Sheet.Screen
+          name="peek"
+          options={{
+            detents: ['peek', 1],
+            backgroundColor: DARK,
+            cornerRadius: 16,
+            style: styles.peekSheet,
+            header: <Header />,
+          }}
+        />
       </Sheet>
     </TrueSheetProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  scrollableSheet: {
+    flex: 1,
+  },
+  peekSheet: {
+    flex: 1,
+  },
+  // Transparent on iOS so the scroll edge effect shows through
+  scrollableFooter: {
+    backgroundColor: Platform.select({ default: DARK_GRAY, ios: undefined }),
+  },
+});

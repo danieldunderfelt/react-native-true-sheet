@@ -6,6 +6,12 @@ jest.mock('./src/specs/NativeTrueSheetModule', () => ({
   default: {
     presentByRef: jest.fn(),
     dismissByRef: jest.fn(),
+    dismissStackByRef: jest.fn(),
+    resizeByRef: jest.fn(),
+    dismissAll: jest.fn(),
+    suspendAll: jest.fn(),
+    unsuspendAll: jest.fn(),
+    handleBackPress: jest.fn(),
   },
 }));
 
@@ -17,7 +23,8 @@ jest.mock('./src/fabric/TrueSheetViewNativeComponent', () => {
   return {
     __esModule: true,
     default: React.forwardRef((props, ref) => {
-      return React.createElement(View, { ...props, ref });
+      React.useImperativeHandle(ref, () => ({ _nativeTag: 1 }));
+      return React.createElement(View, props);
     }),
   };
 });

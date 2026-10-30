@@ -41,16 +41,20 @@ await TrueSheet.dismiss(name: string, animated?: boolean)
 await TrueSheet.dismissStack(name: string, animated?: boolean)
 await TrueSheet.resize(name: string, index: number)
 await TrueSheet.dismissAll(animated?: boolean)
+await TrueSheet.suspendAll()
+await TrueSheet.unsuspendAll()
 ```
 
 `dismissAll` closes every sheet in the current context. It won't affect sheets behind a React Native `Modal`.
+
+`suspendAll` makes every currently open sheet step aside natively while staying logically presented (same semantics as the `suspended` prop; the two are independent). Sheets presented afterwards are unaffected. `unsuspendAll` brings the captured sheets back at their remembered detents without present events. Both are no-ops on web.
 
 ### Web hook
 
 On web, use the `useTrueSheet()` hook from inside a `TrueSheetProvider`:
 
 ```tsx
-const { present, dismiss, dismissStack, resize, dismissAll } = useTrueSheet()
+const { present, dismiss, dismissStack, resize, dismissAll, suspendAll, unsuspendAll } = useTrueSheet()
 
 // Same signatures as global methods
 await present('sheet-name')
@@ -72,6 +76,7 @@ These fire in pairs — "will" before the animation and "did" after.
 | `onDidPresent` | `DetentInfoEventPayload` | Finished presenting |
 | `onWillDismiss` | — | About to start dismissing |
 | `onDidDismiss` | — | Finished dismissing |
+| `onDismissAttempt` | — | User tried to dismiss while `dismissible={false}` (drag, back/escape, a11y — not dim tap). Sheet stays open — confirm, then call `dismiss()`. Consumes Android back press |
 
 ### Detent and drag events
 
