@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { TrueSheet } from '@lodev09/react-native-true-sheet';
+import { TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
 
 import { Button, ButtonGroup, Input } from '@example/shared/components';
 import { BLUE, DARK, DARK_BLUE, GAP, LIGHT_GRAY, SPACING } from '@example/shared/utils';

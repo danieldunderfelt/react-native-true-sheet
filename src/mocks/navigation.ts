@@ -4,7 +4,7 @@ import type { TrueSheetNavigationProp } from '../navigation/types';
 
 /**
  * Mock createTrueSheetNavigator for testing.
- * Import from '@lodev09/react-native-true-sheet/navigation/mock' in your test setup.
+ * Import from '@danieldunderfelt/react-native-true-sheet/navigation/mock' in your test setup.
  */
 export const createTrueSheetNavigator = jest.fn(() => ({
   Navigator: jest.fn(({ children }: { children: React.ReactNode }) => children),

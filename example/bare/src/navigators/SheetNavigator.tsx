@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { TrueSheet } from '@lodev09/react-native-true-sheet';
+import { TrueSheet } from '@danieldunderfelt/react-native-true-sheet';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import {
   createTrueSheetNavigator,
   useTrueSheetNavigation,
-} from '@lodev09/react-native-true-sheet/navigation';
+} from '@danieldunderfelt/react-native-true-sheet/navigation';
 import { Button, DemoContent, Footer, Header } from '@example/shared/components';
 import { BLUE, DARK, DARK_BLUE, DARK_GRAY, GAP, LIGHT_GRAY, SPACING } from '@example/shared/utils';
 import type { AppStackParamList, SheetHomeStackParamList, SheetStackParamList } from '../types';

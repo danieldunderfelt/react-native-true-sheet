@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 4.1.1
+
+### 🐛 Bug fixes
+
+- **iOS**: `animatedIndex` and `onPositionChange` now report the exact detent index once the sheet settles, instead of holding a fraction left by an offset learned mid-animation. Quick `resize()` calls or grabber taps no longer pull the sheet back to an earlier detent or report a stale `onDetentChange`. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
+
+## 4.1.0
+
 ### 🎉 New features
 
 - **iOS**, **Android**: New `suspended` prop steps a presented sheet aside natively — dismissed on iOS, hidden on Android — without reporting a close. The sheet stays logically presented, keeps its content and detent, and returns when unset, so a full-screen native `Modal` can present over it. (by [@danieldunderfelt](https://github.com/danieldunderfelt))
