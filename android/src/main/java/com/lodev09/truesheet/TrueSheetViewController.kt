@@ -148,6 +148,11 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     data object Reconfiguring : InteractionState()
   }
 
+  private enum class HideReason {
+    SCREEN,
+    SUSPENSION
+  }
+
   // =============================================================================
   // MARK: - Properties
   // =============================================================================
@@ -164,8 +169,24 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   var isPresented = false
     private set
 
-  var isSheetVisible = false
-    private set
+  // Why a presented sheet is hidden: its screen is covered, or it's suspended
+  private val hideReasons = mutableSetOf<HideReason>()
+
+  // Bumped whenever visibility changes so a stale screen fade-out doesn't hide the sheet again
+  private var visibilityGeneration = 0
+
+  val isSheetVisible: Boolean
+    get() = isPresented && hideReasons.isEmpty()
+
+  val wasHiddenByScreen: Boolean
+    get() = HideReason.SCREEN in hideReasons
+
+  val isSuspended: Boolean
+    get() = HideReason.SUSPENSION in hideReasons
+
+  // Presented, but finishPresent() hasn't run yet
+  val isPresentInFlight: Boolean
+    get() = isPresented && presentPromise != null
 
   var currentDetentIndex: Int = -1
     private set
@@ -185,7 +206,6 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   private var hasPendingSizeChange = false
   internal var isBeingDismissed = false
     private set
-  var wasHiddenByScreen = false
   private var shouldAnimatePresent = false
   private var isPresentAnimating = false
 
@@ -465,7 +485,9 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     backgroundAnimator?.cancel()
     backgroundAnimator = null
     targetBackgroundColor = null
+    visibilityGeneration++
     sheetView?.animate()?.cancel()
+    dimViews.forEach { it.animate().cancel() }
 
     // Cleanup dim views
     dimView?.detach()
@@ -487,8 +509,7 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     hasPendingSizeChange = false
     isBeingDismissed = false
     isPresented = false
-    isSheetVisible = false
-    wasHiddenByScreen = false
+    hideReasons.clear()
     cachedContentHeight = 0
     cachedHeaderHeight = 0
     isPresentAnimating = false
@@ -589,7 +610,8 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   override fun dimViewDidTap() {
     val hostView = delegate as? TrueSheetView ?: return
 
-    val children = TrueSheetStackManager.getSheetsAbove(hostView)
+    // A suspended sheet above can't be tapped through to
+    val children = TrueSheetStackManager.getSheetsAbove(hostView).filter { it.viewController.isSheetVisible }
     val topmostChild = children.firstOrNull()?.viewController
 
     // If topmost child is dimmed, only handle that child
@@ -839,25 +861,40 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
       return
     }
 
-    isSheetVisible = false
-    wasHiddenByScreen = true
-    TrueSheetStackManager.updateBackgroundAccessibility()
-    delegate?.viewControllerDidChangeVisibility(false)
-    dimViews.forEach { it.animate().alpha(0f).setDuration(SCREEN_FADE_DURATION).start() }
-    sheet.animate()
-      .alpha(0f)
-      .setDuration(SCREEN_FADE_DURATION)
-      .withEndAction {
-        setSheetVisibility(false)
-      }
-      .start()
+    if (!hideReasons.add(HideReason.SCREEN)) return
+
+    // Already hidden by suspension — nothing to fade out
+    if (hideReasons.size > 1) {
+      setSheetVisibility(false)
+    } else {
+      TrueSheetStackManager.updateBackgroundAccessibility()
+      delegate?.viewControllerDidChangeVisibility(false)
+      val generation = ++visibilityGeneration
+      dimViews.forEach { it.animate().alpha(0f).setDuration(SCREEN_FADE_DURATION).start() }
+      sheet.animate()
+        .alpha(0f)
+        .setDuration(SCREEN_FADE_DURATION)
+        .withEndAction {
+          if (generation == visibilityGeneration) setSheetVisibility(false)
+        }
+        .start()
+    }
 
     // This will hide parent sheets first
     parentSheetView?.viewController?.hideForScreen()
   }
 
   internal fun showAfterScreen() {
-    isSheetVisible = true
+    if (!hideReasons.remove(HideReason.SCREEN)) return
+
+    // Stop a fade-out still running so its end action doesn't hide the sheet again
+    visibilityGeneration++
+    sheetView?.animate()?.cancel()
+    dimViews.forEach { it.animate().cancel() }
+
+    // Still suspended — resumeFromSuspend() brings it back
+    if (hideReasons.isNotEmpty()) return
+
     delegate?.viewControllerDidChangeVisibility(true)
     setSheetVisibility(true)
     sheetView?.alpha = 1f
@@ -870,8 +907,96 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
    * Android may restore visibility on activity resume, so we need to hide it again.
    */
   fun reapplyHiddenState() {
-    if (!wasHiddenByScreen) return
+    if (hideReasons.isEmpty()) return
     setSheetVisibility(false)
+  }
+
+  // =============================================================================
+  // MARK: - Suspension
+  // =============================================================================
+
+  /**
+   * Hides the sheet without dismissing it — it stays presented at its detent, off the
+   * keyboard, until [resumeFromSuspend]. Focus moves to the parent like a dismiss.
+   */
+  internal fun suspend() {
+    if (!isPresented || isSuspended) return
+
+    val wasVisible = isSheetVisible
+    if (wasVisible) {
+      delegate?.viewControllerWillBlur()
+      parentSheetView?.takeIf { it.viewController.isSheetVisible }?.viewControllerWillFocus()
+    }
+
+    // Return at the detent JS knows about, not the keyboard expansion
+    val hadKeyboard = isKeyboardActive || detentIndexBeforeKeyboard >= 0
+    val detentIndex = knownDetentIndex
+    cleanupKeyboardObserver()
+    if (wasVisible) dismissKeyboard()
+    isKeyboardDismissProgrammatic = false
+    isKeyboardSettleDeferred = false
+    keyboardSettleStartTop = -1
+    if (hadKeyboard) {
+      detentIndexBeforeKeyboard = -1
+      currentDetentIndex = detentIndex
+      setupSheetDetents()
+    }
+
+    hideReasons.add(HideReason.SUSPENSION)
+    visibilityGeneration++
+    sheetView?.animate()?.cancel()
+    dimViews.forEach { it.animate().cancel() }
+    setSheetVisibility(false)
+
+    // Nothing visible stays stacked on a suspended sheet, so nothing pushes it down
+    sheetView?.translationY = 0f
+    behavior?.isDraggable = draggable
+
+    TrueSheetStackManager.updateBackgroundAccessibility()
+
+    if (wasVisible) {
+      delegate?.viewControllerDidBlur()
+      delegate?.viewControllerDidChangeVisibility(false)
+    }
+  }
+
+  /**
+   * Shows a suspended sheet again at [detentIndex] (or where it was), without present events.
+   */
+  internal fun resumeFromSuspend(detentIndex: Int) {
+    if (!isSuspended) return
+
+    if (detentIndex in detents.indices && detentIndex != currentDetentIndex) {
+      currentDetentIndex = detentIndex
+      pendingDetentIndex = -1
+      setupDimmedBackground()
+      setupSheetDetents()
+      sheetView?.updateGrabberAccessibilityValue(detentIndex, detents.size)
+    }
+    setupKeyboardObserver()
+
+    hideReasons.remove(HideReason.SUSPENSION)
+
+    // Still covered by navigation — showAfterScreen() brings it back
+    if (hideReasons.isNotEmpty()) return
+
+    val parent = parentSheetView?.takeIf { it.viewController.isSheetVisible }
+    parent?.viewControllerWillBlur()
+    delegate?.viewControllerWillFocus()
+
+    visibilityGeneration++
+    setSheetVisibility(true)
+    sheetView?.alpha = 1f
+    updateDimAmount()
+    TrueSheetStackManager.updateBackgroundAccessibility()
+
+    // Positions were dropped while hidden — resync JS with where the sheet is now
+    lastEmittedPositionPx = -1
+    sheetView?.let { emitChangePositionDelegate(it.top, realtime = false) }
+
+    parent?.viewControllerDidBlur()
+    delegate?.viewControllerDidFocus()
+    delegate?.viewControllerDidChangeVisibility(true)
   }
 
   // =============================================================================
@@ -919,7 +1044,6 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     }
 
     isPresented = true
-    isSheetVisible = true
   }
 
   fun resize(detentIndex: Int) {
@@ -971,7 +1095,8 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     if (isBeingDismissed) return
 
     isBeingDismissed = true
-    dismissKeyboard()
+    // A suspended sheet let go of the keyboard already — it may belong to what's shown over it now
+    if (!isSuspended) dismissKeyboard()
     emitWillDismissEvents()
 
     if (animated) {
@@ -993,6 +1118,9 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   }
 
   fun handleBackPress() {
+    // Back passes through a hidden sheet
+    if (!isSheetVisible) return
+
     if (dismissible) {
       dismiss(animated = true)
     }
@@ -1262,7 +1390,7 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
     (delegate as? TrueSheetView)?.let { hostView ->
       TrueSheetStackManager.getSheetsAbove(hostView).asReversed().forEach {
         val child = it.viewController
-        if (!child.dimmed) return@forEach
+        if (!child.dimmed || !child.isSheetVisible) return@forEach
         val below = (1f - child.dimProgress) * opacity
         val above = child.dimProgress * child.dimOpacity
         if (below + above > 0f) color = ColorUtils.blendARGB(color, child.dimColor, above / (below + above))
@@ -1339,7 +1467,7 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   // =============================================================================
 
   private fun shouldHandleKeyboard(checkFocus: Boolean = true): Boolean {
-    if (wasHiddenByScreen) return false
+    if (hideReasons.isNotEmpty()) return false
     if (!isTopmostSheet) return false
     if (checkFocus && !isFocusedViewWithinSheet()) return false
     return true
@@ -1548,9 +1676,10 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
   }
 
   private fun emitWillDismissEvents() {
-    delegate?.viewControllerWillBlur()
+    // A suspended sheet already handed focus back when it stepped aside
+    if (!isSuspended) delegate?.viewControllerWillBlur()
     delegate?.viewControllerWillDismiss()
-    parentSheetView?.viewControllerWillFocus()
+    if (!isSuspended) parentSheetView?.viewControllerWillFocus()
 
     // Dismissed mid-present: finishPresent() won't run. Stop blocking touches, and settle the
     // pending present well before didDismiss so JS clears isPresenting and unmounts the lazy native view
@@ -1561,10 +1690,11 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
 
   private fun emitDidDismissEvents() {
     val parent = parentSheetView
-    parentSheetView = null
 
-    delegate?.viewControllerDidBlur()
+    if (!isSuspended) delegate?.viewControllerDidBlur()
     delegate?.viewControllerDidDismiss(parent)
+    // Cleared after the delegate unregisters this sheet, so sheets stacked on it are reparented to its parent
+    parentSheetView = null
 
     dismissPromise?.invoke()
     dismissPromise = null
@@ -1663,6 +1793,7 @@ class TrueSheetViewController(private val reactContext: ThemedReactContext) :
    * driven by onSlide so the parent tracks this sheet's actual position.
    */
   private fun syncParentTranslation(sheetTop: Int) {
+    if (isSuspended) return
     val parent = parentSheetView ?: return
     val minSheetTop = detentCalculator.getSheetTopForDetentIndex(0)
     parent.syncTranslationForChild(sheetTop, minSheetTop)

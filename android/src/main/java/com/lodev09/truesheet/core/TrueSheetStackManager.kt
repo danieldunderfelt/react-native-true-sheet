@@ -40,6 +40,20 @@ object TrueSheetStackManager {
   }
 
   /**
+   * Points sheets stacked on the given sheet at its parent, so focus routing and dismissAll
+   * still reach them when it leaves the stack first (e.g. unmounted, or swapped in the same tick).
+   * Must be called within synchronized block.
+   */
+  private fun reparentChildren(sheetView: TrueSheetView) {
+    val parentSheetView = sheetView.viewController.parentSheetView
+    presentedSheetStack.forEach {
+      if (it !== sheetView && it.viewController.parentSheetView === sheetView) {
+        it.viewController.parentSheetView = parentSheetView
+      }
+    }
+  }
+
+  /**
    * Registers a sheet in the stack and returns its parent sheet if any.
    * Only returns a parent if it's in the same container (e.g., same Screen).
    */
@@ -63,6 +77,7 @@ object TrueSheetStackManager {
   @JvmStatic
   fun unregisterSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -76,6 +91,9 @@ object TrueSheetStackManager {
 
     // Post to ensure layout is complete before reading position
     sheetView.viewController.post {
+      // A suspended sheet doesn't push its parent down
+      if (sheetView.viewController.isSuspended) return@post
+
       val childMinSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(0)
       val childCurrentSheetTop = sheetView.viewController.detentCalculator.getSheetTopForDetentIndex(
         sheetView.viewController.currentDetentIndex
@@ -102,9 +120,20 @@ object TrueSheetStackManager {
     }
   }
 
+  /**
+   * Returns a snapshot of the presented sheets, bottom-most first.
+   */
+  @JvmStatic
+  fun getPresentedSheetsInStackOrder(): List<TrueSheetView> {
+    synchronized(presentedSheetStack) {
+      return presentedSheetStack.toList()
+    }
+  }
+
   @JvmStatic
   fun removeSheet(sheetView: TrueSheetView) {
     synchronized(presentedSheetStack) {
+      reparentChildren(sheetView)
       presentedSheetStack.remove(sheetView)
     }
   }
@@ -117,13 +146,16 @@ object TrueSheetStackManager {
   }
 
   /**
-   * Returns true if the given sheet is the topmost presented sheet in its container.
+   * Returns true if the given sheet is the topmost visible sheet in its container.
+   * A hidden (suspended) sheet above doesn't take the keyboard from the one below it.
    */
   @JvmStatic
   fun isTopmostSheet(sheetView: TrueSheetView): Boolean {
     synchronized(presentedSheetStack) {
       val rootContainer = sheetView.rootContainerView
-      return presentedSheetStack.lastOrNull { it.rootContainerView == rootContainer } == sheetView
+      return presentedSheetStack.lastOrNull {
+        it.rootContainerView == rootContainer && it.viewController.isSheetVisible
+      } == sheetView
     }
   }
 
